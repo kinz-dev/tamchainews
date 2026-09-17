@@ -1,0 +1,129 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  idFor, makeRecord, stateOf, ratioOf, percentOf, advance, tally, DONE_RATIO,
+  makeCheckpoint, isResumable, RESUME_MAX_AGE_MS, resumePoint, parseDailyId,
+} from '../web/listened.js';
+
+test('ids are stable and distinguish the thing being listened to', () => {
+  assert.equal(idFor.digestHighlights(75), 'digest:75:highlights');
+  assert.equal(idFor.digestTopic(75, 'AI'), 'digest:75:topic:AI');
+  assert.equal(idFor.digestChannel(75, 'r/technology'), 'digest:75:channel:r/technology');
+  assert.equal(idFor.daily('2026-09-16'), 'daily:2026-09-16');
+  // Two channels in the same digest must not collide.
+  assert.notEqual(idFor.digestChannel(75, 'a'), idFor.digestChannel(75, 'b'));
+  // Nor the same channel across digests.
+  assert.notEqual(idFor.digestChannel(75, 'a'), idFor.digestChannel(76, 'a'));
+});
+
+test('a re-run of a scheduled task is a different item', () => {
+  assert.notEqual(idFor.task('983ec834e7dc', 1789664993), idFor.task('983ec834e7dc', 1789751393));
+  assert.equal(idFor.task('abc'), 'task:abc:0');
+});
+
+test('stateOf reads the three states', () => {
+  assert.equal(stateOf(undefined), 'new');
+  assert.equal(stateOf(makeRecord({ id: 'x' })), 'new');
+  assert.equal(stateOf(makeRecord({ id: 'x', segment: 3, total: 10 })), 'partial');
+  assert.equal(stateOf(makeRecord({ id: 'x', done: true })), 'listened');
+});
+
+test('ratio counts the segment just spoken, and a finished item is always whole', () => {
+  assert.equal(ratioOf(makeRecord({ id: 'x', segment: 4, total: 10 })), 0.5);
+  assert.equal(percentOf(makeRecord({ id: 'x', segment: 4, total: 10 })), 50);
+  assert.equal(ratioOf(makeRecord({ id: 'x', done: true, segment: 0, total: 0 })), 1);
+  assert.equal(ratioOf(undefined), 0);
+  assert.equal(ratioOf(makeRecord({ id: 'x', segment: 5, total: 0 })), 0);
+});
+
+test('advance marks done once past the threshold', () => {
+  const total = 20;
+  const nearly = advance(undefined, { segment: Math.floor(total * DONE_RATIO) - 2, total });
+  assert.equal(nearly.done, false);
+  const finished = advance(nearly, { segment: total - 1, total });
+  assert.equal(finished.done, true);
+});
+
+test('advance never moves progress backwards', () => {
+  const far = advance(undefined, { segment: 12, total: 20 });
+  const rewound = advance(far, { segment: 2, total: 20 });
+  assert.equal(rewound.segment, 12, 'scrubbing back keeps the furthest point');
+});
+
+test('re-listening to a finished item does not un-finish it', () => {
+  const done = advance(undefined, { segment: 19, total: 20 });
+  assert.equal(done.done, true);
+  const again = advance(done, { segment: 0, total: 20 });
+  assert.equal(again.done, true);
+});
+
+test('advance keeps the title once it has one', () => {
+  const first = advance(undefined, { segment: 1, total: 10, title: 'r/technology' });
+  const later = advance(first, { segment: 2, total: 10, title: '' });
+  assert.equal(later.title, 'r/technology');
+});
+
+test('tally splits what is on screen three ways', () => {
+  const records = new Map([
+    ['a', makeRecord({ id: 'a', done: true })],
+    ['b', makeRecord({ id: 'b', segment: 2, total: 10 })],
+  ]);
+  assert.deepEqual(tally(['a', 'b', 'c'], records), {
+    total: 3, listened: 1, partial: 1, unheard: 1,
+  });
+  assert.deepEqual(tally([], records), { total: 0, listened: 0, partial: 0, unheard: 0 });
+});
+
+test('a checkpoint carries the text, so resuming needs no network', () => {
+  const cp = makeCheckpoint({ id: 'daily:2026-09-16', title: '聯儲局加息', text: '第一句。第二句。', segment: 3, total: 40 });
+  assert.equal(cp.key, 'current');
+  assert.equal(cp.text, '第一句。第二句。');
+  assert.equal(cp.segment, 3);
+  assert.ok(cp.at > 0);
+});
+
+test('isResumable rejects the checkpoints that are not worth offering', () => {
+  const base = { id: 'x', text: '一句。', segment: 3, total: 40, at: Date.now() };
+  assert.equal(isResumable({ ...base }), true);
+  assert.equal(isResumable(null), false, 'nothing saved');
+  assert.equal(isResumable({ ...base, text: '' }), false, 'no text to replay');
+  assert.equal(isResumable({ ...base, id: '' }), false, 'nothing to attribute it to');
+  assert.equal(isResumable({ ...base, total: 0 }), false, 'no length');
+  // Opening a page parks the player at the top; that is not somewhere to return to,
+  // and treating it as one is how a real position got overwritten.
+  assert.equal(isResumable({ ...base, segment: 0 }), false, 'the very start');
+  assert.equal(isResumable({ ...base, segment: 40 }), false, 'it already finished');
+  assert.equal(isResumable({ ...base, at: Date.now() - RESUME_MAX_AGE_MS - 1 }), false, 'too old');
+  assert.equal(isResumable({ ...base, at: Date.now() - RESUME_MAX_AGE_MS + 1000 }), true, 'just inside the window');
+});
+
+test('parseDailyId pulls the day out, and ignores other kinds', () => {
+  assert.equal(parseDailyId('daily:2026-09-16'), '2026-09-16');
+  assert.equal(parseDailyId('digest:75:channel:r/technology'), '');
+  assert.equal(parseDailyId(''), '');
+  assert.equal(parseDailyId(undefined), '');
+});
+
+test('resumePoint prefers the checkpoint for this item', () => {
+  const cp = { id: 'daily:2026-09-16', text: '一。', segment: 12, total: 69, at: Date.now() };
+  const rec = makeRecord({ id: 'daily:2026-09-16', segment: 40, total: 69 });
+  assert.equal(resumePoint(cp, rec, 'daily:2026-09-16'), 12, 'exact stopping point wins');
+});
+
+test('resumePoint falls back to the furthest point when the checkpoint is elsewhere', () => {
+  const cp = { id: 'daily:2026-09-15', text: '一。', segment: 12, total: 69, at: Date.now() };
+  const rec = makeRecord({ id: 'daily:2026-09-16', segment: 40, total: 69 });
+  assert.equal(resumePoint(cp, rec, 'daily:2026-09-16'), 40);
+});
+
+test('resumePoint starts a finished item over, and copes with nothing stored', () => {
+  const done = makeRecord({ id: 'x', segment: 60, total: 69, done: true });
+  assert.equal(resumePoint(null, done, 'x'), 0, 'nothing left to resume');
+  assert.equal(resumePoint(null, undefined, 'x'), 0);
+  assert.equal(resumePoint(null, makeRecord({ id: 'x' }), 'x'), 0);
+});
+
+test('resumePoint ignores a checkpoint that has gone stale', () => {
+  const stale = { id: 'x', text: '一。', segment: 12, total: 69, at: Date.now() - RESUME_MAX_AGE_MS - 1 };
+  assert.equal(resumePoint(stale, undefined, 'x'), 0);
+});

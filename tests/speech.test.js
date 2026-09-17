@@ -98,6 +98,19 @@ test('estimated duration scales down with a faster rate', () => {
   assert.ok(estimateSeconds(segments, 2) < estimateSeconds(segments, 1));
 });
 
+test('the estimate scales the gaps too, the way the player does', () => {
+  // The player shortens each pause by the rate (_gap divides by it), so a 2x
+  // estimate should be half the 1x one — not half the speech plus full pauses.
+  const { segments } = prepare('一句話。'.repeat(20));
+  const single = estimateSeconds(segments, 1);
+  for (const rate of [1.75, 2]) {
+    assert.ok(
+      Math.abs(estimateSeconds(segments, rate) - single / rate) < 1e-9,
+      `rate ${rate} should be exactly 1/${rate} of the 1x estimate`,
+    );
+  }
+});
+
 test('empty input yields nothing to play', () => {
   assert.deepEqual(prepare('   \n\n  ').segments, []);
 });

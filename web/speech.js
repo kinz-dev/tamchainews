@@ -143,10 +143,17 @@ export function prepare(markdown, options) {
   return { blocks, segments: toSegments(blocks) };
 }
 
-/** Rough seconds per segment, used for the progress read-out. */
+/**
+ * Rough seconds per segment, used for the progress read-out.
+ *
+ * The gaps scale with the rate too — the player shortens them by the same
+ * factor (`_gap` divides by rate), and at 2× the pauses are a big enough share
+ * of the total that leaving them fixed overstates the running time.
+ */
 export function estimateSeconds(segments, rate = 1, charsPerSecond = 4.5) {
   return segments.reduce(
-    (total, segment) => total + segment.speak.length / (charsPerSecond * rate) + segment.pauseAfter / 1000,
+    (total, segment) =>
+      total + segment.speak.length / (charsPerSecond * rate) + segment.pauseAfter / 1000 / rate,
     0,
   );
 }

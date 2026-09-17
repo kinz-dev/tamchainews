@@ -3,19 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>譚仔新聞 · 粵語日報</title>
+<title>譚仔新聞 · 粵語新聞台</title>
 <meta name="theme-color" content="#11151c">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📻</text></svg>">
+<link rel="icon" href="favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
 <header class="topbar">
-  <div class="brand"><span class="brand-mark">📻</span><h1>譚仔新聞<small>粵語日報</small></h1></div>
+  <button id="rail-toggle" class="icon-button rail-toggle" aria-label="目錄" aria-expanded="false">☰</button>
+  <div class="brand">
+    <img class="brand-mark" src="icon.svg" alt="" width="26" height="26">
+    <h1>譚仔新聞<small>粵語新聞台</small></h1>
+  </div>
   <div class="topbar-controls">
-    <label class="field"><span>語音</span>
-      <select id="voice-select"></select>
-    </label>
+    <label class="field"><span>語音</span><select id="voice-select"></select></label>
     <label class="field"><span>語速</span>
       <select id="rate-select">
         <option value="0.8">0.8×</option>
@@ -24,32 +29,69 @@
         <option value="1.1">1.1×</option>
         <option value="1.25">1.25×</option>
         <option value="1.5">1.5×</option>
+        <option value="1.75">1.75×</option>
+        <option value="2">2.0×</option>
       </select>
     </label>
-    <button id="refresh" class="icon-button" title="重新載入新聞">↻</button>
+    <button id="refresh" class="icon-button" title="立即重新抓取上游（略過快取）">↻</button>
   </div>
 </header>
 
 <div id="banner" class="banner" hidden></div>
 
-<main class="layout">
-  <aside class="days" aria-label="日期">
-    <h2 class="days-title">每日摘要</h2>
-    <ul id="day-list" class="day-list"></ul>
-    <label class="autoplay">
-      <input type="checkbox" id="autoplay-next"> 連續播放下一日
-    </label>
+<div class="shell">
+
+  <!-- Left rail: the spine of the app — views, then topics, then channels. -->
+  <aside id="rail" class="rail" aria-label="目錄">
+    <nav class="views" aria-label="檢視">
+      <a class="view-link" data-view="digests" href="#/digests"><span class="ico">📰</span>摘要</a>
+      <a class="view-link" data-view="daily"   href="#/daily"><span class="ico">🗓</span>每日總覽</a>
+      <a class="view-link" data-view="tasks"   href="#/tasks"><span class="ico">🧾</span>定時報告</a>
+      <a class="view-link" data-view="sources" href="#/sources"><span class="ico">🛰</span>訊源狀態</a>
+    </nav>
+
+    <div class="rail-section">
+      <h2 class="rail-title">主題</h2>
+      <ul id="topic-list" class="rail-list"></ul>
+    </div>
+
+    <div class="rail-section">
+      <h2 class="rail-title">收聽紀錄 <span id="listen-tally" class="rail-count" hidden></span></h2>
+      <label class="rail-check">
+        <input type="checkbox" id="hide-listened"> 只顯示未聽
+      </label>
+      <button id="clear-listened" class="rail-button" type="button">清除收聽紀錄</button>
+      <p id="listen-note" class="rail-note" hidden></p>
+    </div>
+
+    <div class="rail-section">
+      <h2 class="rail-title">頻道 <span id="channel-count" class="rail-count"></span></h2>
+      <input id="channel-filter" class="rail-search" type="search" placeholder="搜尋頻道…" autocomplete="off">
+      <ul id="channel-list" class="rail-list channels"></ul>
+    </div>
   </aside>
 
-  <section class="reader">
-    <div id="reader-meta" class="reader-meta"></div>
-    <article id="reader-body" class="reader-body" tabindex="0">
-      <p class="placeholder">載入中…</p>
-    </article>
-  </section>
-</main>
+  <div id="rail-scrim" class="rail-scrim" hidden></div>
 
-<footer class="playerbar">
+  <main class="content">
+    <div id="crumbs" class="crumbs"></div>
+    <div id="status-strip" class="status-strip"></div>
+    <div id="view" class="view">
+      <p class="placeholder">載入中…</p>
+    </div>
+    <nav id="pager" class="pager" hidden>
+      <button id="page-prev" class="page-button">← 較新</button>
+      <span id="page-label" class="page-label"></span>
+      <button id="page-next" class="page-button">較舊 →</button>
+    </nav>
+  </main>
+</div>
+
+<footer class="playerbar" id="playerbar" hidden>
+  <div class="now-playing">
+    <div id="now-title" class="now-title">未播放</div>
+    <div id="now-sub" class="now-sub"></div>
+  </div>
   <div class="transport">
     <button id="prev" class="icon-button" title="上一句 (←)">⏮</button>
     <button id="toggle" class="icon-button primary" title="播放 / 暫停 (空白鍵)">▶</button>
