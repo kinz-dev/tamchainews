@@ -1,0 +1,10 @@
+{
+  "name": "tamchainews",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cantonese text-to-speech reader for the sesame daily news digest",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

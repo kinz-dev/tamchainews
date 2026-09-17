@@ -1,0 +1,4 @@
+# runtime state: virtualenv, cached digests, server logs
+.venv/
+data/
+__pycache__/

@@ -1,0 +1,12 @@
+[Unit]
+Description=tamchainews Cantonese news reader
+After=network-online.target
+
+[Service]
+ExecStart=%h/projects/tamchainews/run.sh --port 8082
+WorkingDirectory=%h/projects/tamchainews
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

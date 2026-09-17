@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>譚仔新聞 · 粵語日報</title>
+<meta name="theme-color" content="#11151c">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📻</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark">📻</span><h1>譚仔新聞<small>粵語日報</small></h1></div>
+  <div class="topbar-controls">
+    <label class="field"><span>語音</span>
+      <select id="voice-select"></select>
+    </label>
+    <label class="field"><span>語速</span>
+      <select id="rate-select">
+        <option value="0.8">0.8×</option>
+        <option value="0.9">0.9×</option>
+        <option value="1" selected>1.0×</option>
+        <option value="1.1">1.1×</option>
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+      </select>
+    </label>
+    <button id="refresh" class="icon-button" title="重新載入新聞">↻</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main class="layout">
+  <aside class="days" aria-label="日期">
+    <h2 class="days-title">每日摘要</h2>
+    <ul id="day-list" class="day-list"></ul>
+    <label class="autoplay">
+      <input type="checkbox" id="autoplay-next"> 連續播放下一日
+    </label>
+  </aside>
+
+  <section class="reader">
+    <div id="reader-meta" class="reader-meta"></div>
+    <article id="reader-body" class="reader-body" tabindex="0">
+      <p class="placeholder">載入中…</p>
+    </article>
+  </section>
+</main>
+
+<footer class="playerbar">
+  <div class="transport">
+    <button id="prev" class="icon-button" title="上一句 (←)">⏮</button>
+    <button id="toggle" class="icon-button primary" title="播放 / 暫停 (空白鍵)">▶</button>
+    <button id="next" class="icon-button" title="下一句 (→)">⏭</button>
+    <button id="stop" class="icon-button" title="停止 (Esc)">⏹</button>
+  </div>
+  <div class="progress-wrap">
+    <div id="progress" class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+    <div id="progress-label" class="progress-label">未開始</div>
+  </div>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
