@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="譚仔新聞">
+  <title>譚仔新聞</title>
+  <!-- A 譚仔 bowl broadcasting: the noodle shop and the news bulletin in one mark.
+       Bold shapes only, so it still reads at 16px in a browser tab. -->
+  <rect width="512" height="512" rx="112" fill="#11151c"/>
+  <g fill="none" stroke="#ffb454" stroke-width="26" stroke-linecap="round">
+    <path d="M192.1 255.3 A78 78 0 0 1 319.9 255.3"/>
+    <path d="M147.9 224.3 A132 132 0 0 1 364.1 224.3"/>
+  </g>
+  <rect x="96" y="286" width="320" height="28" rx="14" fill="#ffb454"/>
+  <path d="M120 314 A136 128 0 0 0 392 314 Z" fill="#ffb454"/>
+</svg>

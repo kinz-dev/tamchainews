@@ -1,0 +1,201 @@
+// Shapes the upstream monitor's JSON into what the page renders.
+//
+// Upstream hands back one flat `sections` array per digest, keyed by channel,
+// with the topic repeated on every row. The page wants the opposite: topics as
+// the spine, channels nested under them. Everything here is pure so the
+// reshaping can be tested without a browser or a live upstream.
+
+/** Upstream marks citations as "[3]" inside prose; items carry the matching `ref`. */
+const REF_MARKER = /\[(\d{1,3})\]/g;
+
+/** Digest → {id, checkedAt, posts, refs, topics: [{topic, channels: [...]}]}. */
+export function shapeDigest(digest) {
+  const sections = digest.sections || [];
+  return {
+    id: String(digest.check_id ?? ''),
+    kind: digest.kind || 'channels',
+    checkedAt: Number(digest.checked_at) || 0,
+    posts: Number(digest.posts) || 0,
+    refs: Number(digest.refs) || 0,
+    highlights: (digest.highlights || []).join('\n\n'),
+    topics: groupByTopic(sections),
+  };
+}
+
+/**
+ * Flat sections → topics, each holding its channels. Order of first appearance
+ * is kept on both levels: upstream already sorts by relevance, and resorting
+ * alphabetically would throw that away.
+ */
+export function groupByTopic(sections) {
+  const topics = new Map();
+  for (const section of sections) {
+    const name = section.topic || '其他';
+    if (!topics.has(name)) topics.set(name, { topic: name, channels: [], posts: 0 });
+    const group = topics.get(name);
+    const items = section.items || [];
+    group.channels.push({
+      channel: section.channel || '',
+      summary: section.summary || '',
+      items,
+    });
+    group.posts += items.length;
+  }
+  return [...topics.values()];
+}
+
+/**
+ * Split prose on its "[n]" citations so the caller can render the markers as
+ * links without ever putting upstream text through innerHTML.
+ * Returns [{type: 'text'|'ref', value, item?}].
+ */
+export function splitRefs(text, items = []) {
+  const byRef = new Map(items.map((item) => [Number(item.ref), item]));
+  const parts = [];
+  let cursor = 0;
+  for (const match of text.matchAll(REF_MARKER)) {
+    const ref = Number(match[1]);
+    if (!byRef.has(ref)) continue;                     // a bracket that isn't a citation
+    if (match.index > cursor) parts.push({ type: 'text', value: text.slice(cursor, match.index) });
+    parts.push({ type: 'ref', value: String(ref), item: byRef.get(ref) });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) parts.push({ type: 'text', value: text.slice(cursor) });
+  return parts;
+}
+
+/**
+ * Citations read as noise out loud, so they come out before the text is spoken.
+ * Removing "[1]" from "法案 [1]，加州" would otherwise strand a space in front of
+ * the comma, which the voices pause on.
+ */
+export function stripRefs(text) {
+  return text
+    .replace(REF_MARKER, '')
+    .replace(/\s+([，、。；：！？）」』])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * Which feeds are unhealthy, for the status strip.
+ *
+ * `ok: false` covers two different states that deserve different words: a feed
+ * that has tried and failed, and one upstream has only just been given and has
+ * not fetched yet — no attempts, no success, no error. Calling the second one
+ * "失敗" sends you hunting for a breakage that isn't there.
+ */
+export function feedHealth(feeds = []) {
+  const problems = feeds.filter((feed) => feed.ok === false).map((feed) => {
+    const attempts = Number(feed.fetch_seq) || 0;
+    const pending = !attempts && !feed.last_ok && !feed.last_error;
+    return {
+      name: feed.name || '(未命名)',
+      state: pending ? 'pending' : 'failing',
+      error: feed.last_error || '',
+      lastOk: feed.last_ok || 0,
+      errorAt: feed.error_at || 0,
+      attempts,
+    };
+  });
+  return {
+    total: feeds.length,
+    ok: feeds.length - problems.length,
+    problems,
+    failing: problems.filter((p) => p.state === 'failing'),
+    pending: problems.filter((p) => p.state === 'pending'),
+  };
+}
+
+/** One line summarising feed health, for the status strip. */
+export function healthSummary(health) {
+  const bits = [];
+  if (health.failing.length) bits.push(`${health.failing.length} 個訊源失敗`);
+  if (health.pending.length) bits.push(`${health.pending.length} 個訊源未抓取`);
+  return bits.length ? bits.join('·') : `${health.ok} 個訊源正常`;
+}
+
+/** Topic chips, with the channel count upstream reports for each. */
+export function topicCounts(topics = [], channelTopics = {}) {
+  const counts = new Map();
+  for (const topic of Object.values(channelTopics)) {
+    for (const name of String(topic).split(',').map((t) => t.trim())) {
+      if (name) counts.set(name, (counts.get(name) || 0) + 1);
+    }
+  }
+  return topics.map((topic) => ({ topic, channels: counts.get(topic) || 0 }));
+}
+
+const HOST_LABEL = /^www\./;
+
+/** "news.ycombinator.com" from a URL, for the source line under a headline. */
+export function hostOf(url) {
+  try {
+    return new URL(url).hostname.replace(HOST_LABEL, '');
+  } catch {
+    return '';
+  }
+}
+
+/** Upstream timestamps are epoch seconds; the page wants "3 小時前". */
+export function relativeTime(epochSeconds, now = Date.now()) {
+  if (!epochSeconds) return '';
+  const seconds = Math.round(now / 1000 - epochSeconds);
+  if (seconds < 90) return '啱啱';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} 分鐘前`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} 小時前`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days} 日前`;
+  return new Date(epochSeconds * 1000).toLocaleDateString('zh-HK');
+}
+
+/** Absolute clock time, for the digest headers. */
+export function clockTime(epochSeconds) {
+  if (!epochSeconds) return '';
+  return new Date(epochSeconds * 1000).toLocaleString('zh-HK', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+export function formatClock(totalSeconds) {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/**
+ * The page's own URL state: which view, which filter, which page.
+ * Kept in the hash so a filtered view is linkable and the back button works.
+ */
+export function parseRoute(hash = '') {
+  const raw = String(hash).replace(/^#\/?/, '');
+  const [view = 'digests', queryString = ''] = raw.split('?');
+  const query = new URLSearchParams(queryString);
+  const known = ['digests', 'daily', 'tasks', 'sources'];
+  return {
+    view: known.includes(view) ? view : 'digests',
+    topic: query.get('topic') || '',
+    channel: query.get('channel') || '',
+    page: Math.max(1, Number(query.get('page')) || 1),
+  };
+}
+
+export function buildRoute({ view = 'digests', topic = '', channel = '', page = 1 } = {}) {
+  const query = new URLSearchParams();
+  if (topic) query.set('topic', topic);
+  if (channel) query.set('channel', channel);
+  if (page > 1) query.set('page', String(page));
+  const suffix = query.toString();
+  return `#/${view}${suffix ? `?${suffix}` : ''}`;
+}
+
+/** Route → the params /api/feed forwards upstream. */
+export function routeToParams({ topic, channel, page } = {}) {
+  const params = new URLSearchParams();
+  if (topic) params.set('topics', topic);
+  if (channel) params.set('channel', channel);
+  if (page && page > 1) params.set('page', String(page));
+  return params;
+}

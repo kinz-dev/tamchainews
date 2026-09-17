@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """tamchainews sidecar.
 
-Serves the reader UI and proxies the upstream "Daily Summary" JSON feed from the
-same origin, which is what makes the feed reachable from a browser at all: the
+Serves the reader UI and proxies the upstream newsfeed monitor from the same
+origin, which is what makes the feed reachable from a browser at all: the
 upstream sends no CORS headers, speaks plain HTTP and lives on a tailnet name.
 
 Also exposes /api/tts, which synthesises Cantonese audio on demand (edge-tts)
 for devices whose browser has no zh-HK voice.
+
+Every upstream address derives from one `base_url`, set in config.json and
+overridable by TAMCHAI_BASE_URL or --base-url.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import threading
 import time
@@ -25,12 +29,31 @@ from collections import OrderedDict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
-UPSTREAM = "http://sesame.tailb2a681.ts.net:8081/?topics=Daily+Summary&output=json"
-FEED_TTL = 600.0          # upstream refreshes every 3h; this only shields it from hammering
-UPSTREAM_TIMEOUT = 30.0
-CHARS_PER_SECOND = 4.5    # measured against zh-HK neural voices at rate 1.0
+ROOT = Path(__file__).resolve().parent
+WEB_ROOT = ROOT / "web"
+CONFIG_PATH = ROOT / "config.json"
+
+# Fallbacks for every key config.json may set. The file is the source of truth;
+# these only keep the server runnable if it is missing or half-filled.
+DEFAULTS = {
+    "base_url": "http://sesame.tailb2a681.ts.net:8081",
+    "feed_ttl": 600.0,          # upstream refreshes every 2h; this only shields it from hammering
+    "upstream_timeout": 30.0,
+    "chars_per_second": 4.5,    # measured against zh-HK neural voices at rate 1.0
+    "host": "127.0.0.1",
+    "port": 8082,
+}
+
+# config.json key -> environment variable that overrides it.
+ENV_KEYS = {
+    "base_url": "TAMCHAI_BASE_URL",
+    "feed_ttl": "TAMCHAI_FEED_TTL",
+    "upstream_timeout": "TAMCHAI_UPSTREAM_TIMEOUT",
+    "host": "TAMCHAI_HOST",
+    "port": "TAMCHAI_PORT",
+}
 
 TTS_VOICES = [
     {"id": "zh-HK-HiuGaaiNeural", "name": "曉佳（女）", "gender": "Female"},
@@ -40,8 +63,47 @@ TTS_VOICES = [
 TTS_CACHE_MAX_BYTES = 64 * 1024 * 1024
 TTS_MAX_CHARS = 400
 
-ROOT = Path(__file__).resolve().parent
-WEB_ROOT = ROOT / "web"
+# Upstream query parameters the browser is allowed to pass through. Anything
+# else is dropped rather than forwarded, so /api/feed can't be used to probe
+# the upstream with arbitrary arguments.
+FEED_PARAMS = ("topics", "channel", "page", "date")
+
+
+# -------------------------------------------------------------------------- config
+
+
+def load_config(path: Path = CONFIG_PATH, overrides: dict | None = None) -> dict:
+    """Merge, lowest priority first: DEFAULTS, config.json, environment, CLI."""
+    config = dict(DEFAULTS)
+
+    try:
+        config.update(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        pass
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"warning: ignoring {path.name}: {exc}", flush=True)
+
+    for key, env in ENV_KEYS.items():
+        value = os.environ.get(env)
+        if value:
+            config[key] = value
+
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            config[key] = value
+
+    config["base_url"] = str(config["base_url"]).rstrip("/")
+    for key in ("feed_ttl", "upstream_timeout", "chars_per_second"):
+        config[key] = float(config[key])
+    config["port"] = int(config["port"])
+    return config
+
+
+def upstream_url(base_url: str, params: dict | None = None) -> str:
+    """Every upstream address is this one function; nothing else hardcodes a host."""
+    query = {k: v for k, v in (params or {}).items() if v not in (None, "")}
+    query["output"] = "json"
+    return f"{base_url}/?{urlencode(query)}"
 
 
 # --------------------------------------------------------------------------- feed
@@ -57,7 +119,7 @@ def headline_of(text: str) -> str:
     return ""
 
 
-def normalise_day(entry: dict) -> dict | None:
+def normalise_day(entry: dict, chars_per_second: float) -> dict | None:
     text = (entry.get("text") or "").strip()
     day = entry.get("day") or ""
     if not text or not day or entry.get("status") != "ok":
@@ -69,56 +131,99 @@ def normalise_day(entry: dict) -> dict | None:
         "language": entry.get("language") or "",
         "generated_at": entry.get("finished_at") or entry.get("started_at") or 0,
         "chars": len(text),
-        "est_seconds": round(len(text) / CHARS_PER_SECOND),
+        "est_seconds": round(len(text) / chars_per_second),
     }
 
 
-class FeedCache:
-    """TTL cache over the upstream feed, serving stale data when upstream fails."""
+class Upstream:
+    """TTL cache over upstream queries, serving stale data when upstream fails.
 
-    def __init__(self, upstream: str, archive_dir: Path | None):
-        self._upstream = upstream
+    One entry per distinct query, because the UI browses by topic, channel and
+    page — and the upstream is single-threaded, so repeat views must not reach it.
+    """
+
+    def __init__(self, config: dict, archive_dir: Path | None):
+        self._config = config
         self._archive_dir = archive_dir
         self._lock = threading.Lock()
-        self._days: list[dict] = []
-        self._fetched_at = 0.0
-        self._error: str | None = None
+        self._entries: dict[str, dict] = {}       # key -> {payload, fetched_at, error}
+        self._inflight: dict[str, threading.Lock] = {}
 
-    def get(self, force: bool = False) -> dict:
+    # -- raw queries ------------------------------------------------------
+
+    def fetch(self, params: dict, force: bool = False) -> dict:
+        """Upstream payload for `params`, wrapped with cache/error metadata."""
+        key = urlencode(sorted((k, str(v)) for k, v in params.items()))
+        ttl = self._config["feed_ttl"]
+
         with self._lock:
-            fresh = time.time() - self._fetched_at < FEED_TTL
-            if self._days and fresh and not force:
-                return self._payload(cached=True)
-            try:
-                days = self._fetch()
-            except Exception as exc:                      # upstream down → serve what we have
-                self._error = f"{type(exc).__name__}: {exc}"
-                if not self._days:
-                    self._days = self._read_archive()
-                return self._payload(cached=True)
-            self._error = None
-            self._fetched_at = time.time()
-            self._write_archive(days)
-            merged = {d["day"]: d for d in self._read_archive()}
-            merged.update({d["day"]: d for d in days})
-            self._days = sorted(merged.values(), key=lambda d: d["day"], reverse=True)
-            return self._payload(cached=False)
+            entry = self._entries.get(key)
+            if entry and not force and time.time() - entry["fetched_at"] < ttl:
+                return self._wrap(entry, cached=True)
+            gate = self._inflight.setdefault(key, threading.Lock())
 
-    def _payload(self, cached: bool) -> dict:
-        return {
-            "days": self._days,
-            "fetched_at": self._fetched_at,
+        with gate:
+            with self._lock:                      # another thread may have just filled it
+                entry = self._entries.get(key)
+                if entry and not force and time.time() - entry["fetched_at"] < ttl:
+                    return self._wrap(entry, cached=True)
+            try:
+                payload = self._get(params)
+                error = None
+            except Exception as exc:              # upstream down → serve what we have
+                payload, error = None, f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                previous = self._entries.get(key)
+                if payload is None and previous:
+                    previous["error"] = error
+                    result = self._wrap(previous, cached=True)
+                else:
+                    entry = {
+                        "payload": payload if payload is not None else {},
+                        "fetched_at": time.time() if payload is not None else 0.0,
+                        "error": error,
+                    }
+                    self._entries[key] = entry
+                    result = self._wrap(entry, cached=False)
+                self._inflight.pop(key, None)
+            return result
+
+    def _wrap(self, entry: dict, cached: bool) -> dict:
+        payload = dict(entry["payload"])
+        payload["_meta"] = {
             "cached": cached,
-            "upstream_error": self._error,
+            "fetched_at": entry["fetched_at"],
+            "upstream_error": entry["error"],
+            "base_url": self._config["base_url"],
+        }
+        return payload
+
+    def _get(self, params: dict) -> dict:
+        url = upstream_url(self._config["base_url"], params)
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=self._config["upstream_timeout"]) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    # -- the Daily Summary view, which is archived ------------------------
+
+    def daily(self, force: bool = False) -> dict:
+        raw = self.fetch({"topics": "Daily Summary"}, force=force)
+        meta = raw.get("_meta", {})
+        cps = self._config["chars_per_second"]
+        days = [normalise_day(e, cps) for e in raw.get("daily") or []]
+        days = sorted((d for d in days if d), key=lambda d: d["day"], reverse=True)
+
+        if days:
+            self._write_archive(days)
+        merged = {d["day"]: d for d in self._read_archive()}
+        merged.update({d["day"]: d for d in days})
+        return {
+            "days": sorted(merged.values(), key=lambda d: d["day"], reverse=True),
+            "fetched_at": meta.get("fetched_at", 0.0),
+            "cached": meta.get("cached", False),
+            "upstream_error": meta.get("upstream_error"),
             "tts_voices": TTS_VOICES if tts_available() else [],
         }
-
-    def _fetch(self) -> list[dict]:
-        req = urllib.request.Request(self._upstream, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as resp:
-            raw = json.loads(resp.read().decode("utf-8"))
-        days = [normalise_day(e) for e in raw.get("daily") or []]
-        return sorted((d for d in days if d), key=lambda d: d["day"], reverse=True)
 
     # The upstream keeps only ~3 days, so archiving is what gives the reader a history.
     def _write_archive(self, days: list[dict]) -> None:
@@ -205,20 +310,31 @@ def synthesise(text: str, voice: str, rate: str) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "tamchainews/1.0"
+    server_version = "tamchainews/2.0"
     protocol_version = "HTTP/1.1"
 
-    feed: FeedCache
+    upstream: Upstream
     tts: TtsCache
+    config: dict
 
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
         query = parse_qs(url.query)
         try:
-            if url.path == "/api/daily":
+            if url.path == "/api/feed":
+                self._api_feed(query)
+            elif url.path == "/api/daily":
                 self._api_daily(query)
             elif url.path == "/api/tts":
                 self._api_tts(query)
+            elif url.path == "/api/config":
+                self._send_json({
+                    "base_url": self.config["base_url"],
+                    "feed_ttl": self.config["feed_ttl"],
+                    "chars_per_second": self.config["chars_per_second"],
+                    "tts": tts_available(),
+                    "tts_voices": TTS_VOICES if tts_available() else [],
+                })
             elif url.path == "/api/health":
                 self._send_json({"ok": True, "tts": tts_available()})
             else:
@@ -228,9 +344,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:                          # never take the server down
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _api_feed(self, query: dict) -> None:
+        params = {name: query[name][0] for name in FEED_PARAMS if query.get(name)}
+        force = query.get("refresh", ["0"])[0] == "1"
+        self._send_json(self.upstream.fetch(params, force=force), cache="no-store")
+
     def _api_daily(self, query: dict) -> None:
-        payload = self.feed.get(force=query.get("refresh", ["0"])[0] == "1")
-        self._send_json(payload, cache="no-store")
+        force = query.get("refresh", ["0"])[0] == "1"
+        self._send_json(self.upstream.daily(force=force), cache="no-store")
 
     def _api_tts(self, query: dict) -> None:
         text = (query.get("text") or [""])[0].strip()
@@ -257,20 +378,38 @@ class Handler(BaseHTTPRequestHandler):
         target = (WEB_ROOT / rel).resolve()
         if not target.is_file() or WEB_ROOT not in target.parents:
             return self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+        # "no-cache" alone tells the browser to revalidate, but with nothing to
+        # revalidate against it may reuse its copy anyway — which serves an
+        # edited file's old contents after a reload. An ETag gives it something
+        # to ask about, and makes the answer cheap when nothing changed.
+        stat = target.stat()
+        etag = f'"{int(stat.st_mtime)}-{stat.st_size}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/manifest+json"):
             ctype += "; charset=utf-8"
-        self._send_bytes(target.read_bytes(), ctype, cache="no-cache")
+        self._send_bytes(target.read_bytes(), ctype, cache="no-cache", etag=etag)
 
     def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK, cache: str = "no-store") -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send_bytes(body, "application/json; charset=utf-8", status, cache)
 
-    def _send_bytes(self, body: bytes, ctype: str, status: HTTPStatus = HTTPStatus.OK, cache: str = "no-store") -> None:
+    def _send_bytes(self, body: bytes, ctype: str, status: HTTPStatus = HTTPStatus.OK,
+                    cache: str = "no-store", etag: str | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
+        if etag:
+            self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(body)
 
@@ -280,17 +419,27 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="tamchainews reader sidecar")
-    parser.add_argument("--port", type=int, default=8082)
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--upstream", default=UPSTREAM)
+    parser.add_argument("--port", type=int, help="overrides config.json")
+    parser.add_argument("--host", help="overrides config.json")
+    parser.add_argument("--base-url", dest="base_url",
+                        help="upstream newsfeed monitor, e.g. http://host:8081 (overrides config.json)")
+    parser.add_argument("--config", default=str(CONFIG_PATH), help="path to config.json")
     parser.add_argument("--archive", default=str(ROOT / "data" / "archive"),
                         help="directory for day snapshots; empty string disables")
     args = parser.parse_args()
 
-    Handler.feed = FeedCache(args.upstream, Path(args.archive) if args.archive else None)
+    config = load_config(Path(args.config), {
+        "base_url": args.base_url,
+        "host": args.host,
+        "port": args.port,
+    })
+
+    Handler.config = config
+    Handler.upstream = Upstream(config, Path(args.archive) if args.archive else None)
     Handler.tts = TtsCache()
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"tamchainews on http://{args.host}:{args.port}  upstream={args.upstream}  "
+    httpd = ThreadingHTTPServer((config["host"], config["port"]), Handler)
+    print(f"tamchainews on http://{config['host']}:{config['port']}  "
+          f"upstream={config['base_url']}  "
           f"tts={'edge-tts' if tts_available() else 'unavailable'}", flush=True)
     try:
         httpd.serve_forever()

@@ -1,0 +1,10 @@
+{
+  "base_url": "http://sesame.tailb2a681.ts.net:8081",
+
+  "feed_ttl": 600,
+  "upstream_timeout": 30,
+  "chars_per_second": 4.5,
+
+  "host": "127.0.0.1",
+  "port": 8082
+}
