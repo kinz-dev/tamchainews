@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   normalizeForSpeech,
+  parseLexicon,
+  setUserLexicon,
   prepare,
   splitSentences,
   toBlocks,
@@ -124,4 +126,52 @@ test('citations are shown but not spoken, so screen and voice stay in step', () 
   // ...while the voice never reads them out.
   assert.doesNotMatch(only.speak, /\[\d+\]/);
   assert.equal(only.speak, '眾議院通過法案，加州簽署新法。');
+});
+
+
+// ---------------------------------------------------------------- user lexicon
+
+test('lexicon rules are one per line, with notes and rubbish ignored', () => {
+  assert.deepEqual(
+    parseLexicon('# 我的讀音\nNVDA=英偉達\n\n  恒指 = 恆生指數  \nno equals\n=empty key'),
+    [['NVDA', '英偉達'], ['恒指', '恆生指數']],
+  );
+});
+
+test('longer rules sort first so a short one cannot eat them', () => {
+  assert.deepEqual(parseLexicon('GDP=甲\nUS GDP=乙').map(([k]) => k), ['US GDP', 'GDP']);
+});
+
+test('a reader rule beats the built-in table', () => {
+  setUserLexicon(parseLexicon('Fed=美聯儲'));
+  assert.equal(normalizeForSpeech('Fed 宣布加息'), '美聯儲 宣布加息');
+  setUserLexicon([]);
+  assert.equal(normalizeForSpeech('Fed 宣布加息'), '聯儲局 宣布加息');
+});
+
+test('a Latin rule respects word boundaries', () => {
+  setUserLexicon(parseLexicon('AI=人工智能'));
+  assert.equal(normalizeForSpeech('AI 晶片'), '人工智能 晶片');
+  assert.equal(normalizeForSpeech('SAID 一句'), 'SAID 一句');   // not S人工智能D
+  setUserLexicon([]);
+});
+
+test('a Chinese rule applies although \\b would never match it', () => {
+  setUserLexicon(parseLexicon('恒指=恆生指數'));
+  assert.equal(normalizeForSpeech('恒指升穿'), '恆生指數升穿');
+  setUserLexicon([]);
+});
+
+test('regex metacharacters in a rule are literal, not a pattern', () => {
+  setUserLexicon(parseLexicon('S&P 500=標普五百'));
+  assert.equal(normalizeForSpeech('S&P 500 創新高'), '標普五百 創新高');
+  setUserLexicon(parseLexicon('a.c=X'));
+  assert.equal(normalizeForSpeech('abc'), 'abc');   // '.' is not "any character"
+  setUserLexicon([]);
+});
+
+test('citations are still dropped with a lexicon loaded', () => {
+  setUserLexicon(parseLexicon('NVDA=英偉達'));
+  assert.equal(normalizeForSpeech('NVDA 領先[12]'), '英偉達 領先');
+  setUserLexicon([]);
 });

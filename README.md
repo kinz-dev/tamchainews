@@ -284,6 +284,38 @@ over a cloud one**, so a Mac or iPhone picks Sinji and reads offline, while Chro
 Google voices all report `localService: false` and send the text to Google — is labelled
 *雲端* in the picker. Being on-device never outranks actually speaking Cantonese.
 
+That last sentence was aspirational until `chooseVoiceId` enforced it. The
+ranking admits zh-TW and plain zh so that *something* reads when nothing better
+exists — and merely being in the list used to win, so a device with only
+Mandarin voices read Cantonese aloud in Mandarin rather than spending a round
+trip on the server's zh-HK voice. A browser voice now wins only when it is
+genuinely Cantonese; anything less is a last resort taken when there is no
+server voice at all.
+
+### 讀音
+
+The built-in table handles what measurably helps every zh-HK voice. Everything
+else — tickers, English company names, 人名 — goes in the rail's 讀音 box, one
+`寫法=讀法` per line, `#` for a note:
+
+```
+NVDA=輝達
+恒指=恆生指數
+```
+
+Not regular expressions, deliberately: these are typed by someone who wants a
+ticker read properly, not a pattern language to get wrong, and a stray `(`
+should not be able to silence the whole lexicon. Reader rules run *before* the
+built-in table, so a correction beats a guess. The rules live in this browser.
+
+### 兩把聲
+
+Quoted material is read in the second server voice. `tagQuotes` carries the
+quote depth across the sentence split — 。 falls inside a quotation as happily
+as outside it, so the second half of a quote has no 「 of its own and would
+otherwise lose the thread. A browser voice, which cannot switch, reads
+everything in one and nothing breaks.
+
 If the browser has no Cantonese voice at all, the server voice is picked instead, and the
 banner explains where to install one on that platform.
 
@@ -301,7 +333,8 @@ through everything unheard.
 | `GET /api/daily` | `{days: [{day, headline, text, chars, est_seconds, …}], cached, upstream_error, tts_voices}` |
 | `GET /api/tts` | `?text=&voice=&rate=±N%` → `audio/mpeg`. `401` without the token, `429` with `Retry-After` once the budget is spent |
 | `GET /api/speech-token` | a 10-minute Azure Speech token, so the browser can talk to Azure itself. `503` unless `azure_key` and `azure_region` are set |
-| `GET /api/config` | `{base_url, feed_ttl, chars_per_second, tts, tts_voices}` |
+| `GET /api/config` | `{base_url, feed_ttl, chars_per_second, tts, tts_voices, tts_token_required, tts_trusted, azure, archive}` |
+| `GET /api/archive.tar.gz` | every archived day, gzipped. The archive is the one thing upstream does not also have |
 | `GET /api/health` | `{ok, tts}` |
 
 `?refresh=1` bypasses the cache on `/api/feed` and `/api/daily`. Each distinct
@@ -340,9 +373,11 @@ web/player.js         playback queue + the two voice back-ends
 web/app.js            UI wiring: router, four views, speak buttons
 web/icon.svg          the app mark — a 譚仔 bowl broadcasting
 tools/make_icons.py   redraws icon.svg into favicon.ico and the PNG sizes
+tools/score_ideas.py  scores the ideas and regenerates docs/PRIORITY.md
 tests/                node --test (web/) + unittest (server.py)  ·  npm test
 docs/ARCHITECTURE.md  the design and the constraints behind it
 docs/IDEAS.md         everything on the table, from the obvious to the daft
+docs/PRIORITY.md      all of it scored for value and effort, and ranked
 docs/ROADMAP.md       what is actually being built next, in order
 ```
 

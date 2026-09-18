@@ -98,6 +98,24 @@ a { color: inherit; }
 .tts-token { font-size: 12px; border-color: var(--accent); }
 .tts-token.set { border-color: var(--border); color: var(--text-dim); }
 
+.rail-text {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  font: inherit; font-size: 12px; line-height: 1.5; padding: 6px 7px;
+  color: var(--text); background: var(--bg-sunken);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.rail-text:focus { outline: none; border-color: var(--accent); }
+
+/* The share bar behind a channel name: how much of the topic it wrote.
+   Behind the text rather than beside it, so the rail keeps its width. */
+.share { position: relative; }
+.share::before {
+  content: ''; position: absolute; inset: 0 auto 0 0; z-index: 0;
+  width: var(--share, 0%); background: var(--accent); opacity: 0.16;
+  border-radius: var(--radius-sm);
+}
+.share > * { position: relative; z-index: 1; }
+
 .rail-toggle { display: none; }
 
 /* ------------------------------------------------------------------ banner */

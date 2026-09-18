@@ -30,8 +30,51 @@ export const PRONUNCIATION = [
   [/\s*[·•]\s*/g, '，'],
 ];
 
+// The reader's own corrections, layered over the table above. Tickers, English
+// company names and 人名 are exactly what the built-in list refuses to guess at,
+// and exactly what comes out as noise every morning — so they are worth a place
+// the reader can edit rather than a patch to this file.
+let userLexicon = [];
+
+/**
+ * Parse one rule per line, `說法=讀音`. A line starting with `#` is a note.
+ *
+ * Deliberately not regular expressions. The rules are typed into a text box by
+ * someone who wants NVDA read properly, not a pattern language to get wrong, and
+ * a stray `(` should not be able to silence the whole lexicon.
+ */
+export function parseLexicon(source = '') {
+  const rules = [];
+  for (const line of String(source).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const at = trimmed.indexOf('=');
+    if (at < 1) continue;
+    const from = trimmed.slice(0, at).trim();
+    const to = trimmed.slice(at + 1).trim();
+    if (from) rules.push([from, to]);
+  }
+  // Longest first, so `US GDP` is not eaten by a rule for `GDP`.
+  return rules.sort((a, b) => b[0].length - a[0].length);
+}
+
+export function setUserLexicon(rules) { userLexicon = rules || []; }
+
+const ESCAPE = /[.*+?^${}()|[\]\\]/g;
+
+function lexiconPattern(term) {
+  const body = term.replace(ESCAPE, '\\$&');
+  // A word boundary only means anything either side of Latin text; against 漢字
+  // \b never matches, which would make a Chinese rule silently do nothing.
+  const head = /^[A-Za-z0-9]/.test(term) ? '\\b' : '';
+  const tail = /[A-Za-z0-9]$/.test(term) ? '\\b' : '';
+  return new RegExp(`${head}${body}${tail}`, 'g');
+}
+
 export function normalizeForSpeech(text) {
   let out = text;
+  // The reader's rules run first, so a correction wins over a built-in guess.
+  for (const [from, to] of userLexicon) out = out.replace(lexiconPattern(from), to);
   for (const [pattern, replacement] of PRONUNCIATION) out = out.replace(pattern, replacement);
   return out.replace(/\s+/g, ' ').trim();
 }
@@ -115,12 +158,41 @@ export function toBlocks(markdown, { maxChars = MAX_SEGMENT_CHARS } = {}) {
   return blocks;
 }
 
+/**
+ * Tag each piece `quote` or `body`, carrying the quote state across the split.
+ *
+ * Sentences break on 。！？, which falls inside a quotation as happily as
+ * outside it — so a piece can begin in the middle of someone speaking, with no
+ * 「 of its own to show for it. Walking the pieces in order and keeping the
+ * depth is the only way the second half of a quote knows what it is.
+ *
+ * A piece counts as a quote when most of it is inside one, not merely when it
+ * touches one: a sentence that ends by opening a quotation is still narration.
+ */
+export function tagQuotes(pieces) {
+  let depth = 0;
+  return pieces.map((piece) => {
+    let inside = 0;
+    for (const char of piece) {
+      if (char === '「' || char === '『') { depth += 1; continue; }
+      if (char === '」' || char === '』') { depth = Math.max(0, depth - 1); continue; }
+      if (depth > 0) inside += 1;
+    }
+    const letters = [...piece].filter((c) => !'「」『』'.includes(c)).length;
+    return { text: piece, role: letters && inside / letters > 0.5 ? 'quote' : 'body' };
+  });
+}
+
 function makeBlock(kind, indent, text, maxChars) {
   const pieces = kind.startsWith('h') ? [text] : splitSentences(text, maxChars);
   return {
     kind,
     indent,
-    segments: pieces.map((piece) => ({ text: piece, speak: normalizeForSpeech(piece) })),
+    segments: tagQuotes(pieces).map(({ text: piece, role }) => ({
+      text: piece,
+      role,
+      speak: normalizeForSpeech(piece),
+    })),
   };
 }
 
@@ -133,6 +205,10 @@ export function toSegments(blocks) {
         index: segments.length,
         blockIndex,
         kind: block.kind,
+        // 'quote' or 'body' — the player reads quoted material in the second
+        // voice, which is what makes a digest sound like two people rather
+        // than one person reading a transcript aloud.
+        role: segment.role || 'body',
         text: segment.text,
         speak: segment.speak,
         // speechSynthesis has no SSML, so pacing has to come from real gaps.

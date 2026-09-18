@@ -5,20 +5,22 @@
 // upstream text is other people's HTML-shaped content (headlines, summaries),
 // and it reaches the page as text nodes only.
 
-import { prepare, estimateSeconds } from './speech.js';
+import { prepare, estimateSeconds, parseLexicon, setUserLexicon } from './speech.js';
 import {
   Player, WebSpeechBackend, ServerTtsBackend,
   loadVoices, rankVoices, installVoiceHint, speechStopsInBackground, clips,
-  setTtsToken,
+  setTtsToken, chooseVoiceId,
 } from './player.js';
 import {
   shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts, recentlyAdded,
+  darkFeeds, darkSummary, channelShare,
   hostOf, relativeTime, clockTime, formatClock,
   parseRoute, buildRoute, routeToParams, RANGES,
 } from './feed.js';
 import {
   ListenStore, idFor, stateOf, percentOf, tally, isResumable, resumePoint, parseDailyId,
   nextPlayable, kindOf, containedBy, allContainedHeard, digestListenIds, anyUnheard,
+  prefsForTopic, rememberTopicPrefs, boredTopics, noteSkip,
 } from './listened.js';
 
 const $ = (id) => document.getElementById(id);
@@ -38,6 +40,7 @@ const els = {
   playerbar: $('playerbar'), nowTitle: $('now-title'), nowSub: $('now-sub'),
   voiceSelect: $('voice-select'), rateSelect: $('rate-select'), refresh: $('refresh'),
   ttsTokenButton: $('tts-token'),
+  lexicon: $('lexicon'), lexiconNote: $('lexicon-note'), exportArchive: $('export-archive'),
   prev: $('prev'), toggle: $('toggle'), next: $('next'), stop: $('stop'),
   progress: $('progress'), progressLabel: $('progress-label'),
 };
@@ -70,7 +73,21 @@ const settings = {
   voiceId: localStorage.getItem('tamchai.voice') || '',
   autoplayNext: localStorage.getItem('tamchai.autoplayNext') === '1',
   hideListened: localStorage.getItem('tamchai.hideListened') === '1',
+  lexicon: localStorage.getItem('tamchai.lexicon') || '',
+  // Per topic, and per topic only: a global default already exists above.
+  topicPrefs: readJson('tamchai.topicPrefs', {}),
+  skips: readJson('tamchai.skips', {}),
 };
+
+function readJson(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+}
+
+function writeJson(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private window */ }
+}
+
+setUserLexicon(parseLexicon(settings.lexicon));
 
 // ------------------------------------------------------------------ player
 
@@ -95,6 +112,7 @@ const player = new Player({
   },
   onFinish: () => {
     els.progressLabel.textContent = '播放完畢';
+    noteTopicInterest(true);
     if (state.activeId) {
       state.listens.set(state.activeId, { done: true, title: els.nowTitle.textContent });
       settleContainment(state.activeId);
@@ -182,8 +200,7 @@ function speakText(text, { title = '', subtitle = '', button = null, id = '' } =
   els.nowSub.textContent = subtitle;
 
   beginHighlighting(block, segments);
-  player.load(segments, chooseBackend());
-  player.setRate(settings.rate);
+  loadIntoPlayer(segments);
   player.play(0);
 }
 
@@ -217,12 +234,54 @@ function saveTtsToken(token) {
   } catch { /* private window: this session only */ }
 }
 
-function chooseBackend() {
-  const id = settings.voiceId;
+/**
+ * Changing the picker while a topic is open sets it *for that topic*.
+ *
+ * Which is the whole point — the setting you reach for is nearly always the
+ * one you want next time you are reading the same thing. With no topic open
+ * the global default is what changed, and there is nothing else to record.
+ */
+function rememberForTopic() {
+  const topic = state.route.topic;
+  if (!topic) return;
+  settings.topicPrefs = rememberTopicPrefs(settings.topicPrefs, topic, {
+    voiceId: settings.voiceId,
+    rate: settings.rate,
+  });
+  writeJson('tamchai.topicPrefs', settings.topicPrefs);
+  showBanner(`「${topic}」以後用呢個設定。`, false, { seconds: 4 });
+}
+
+/**
+ * Start the player with whatever this topic is set to.
+ *
+ * Finance wants a brisk WanLung and a transcript wants a slow HiuMaan, and that
+ * preference is stable — so it is remembered against the topic rather than
+ * reset by hand twice a day. With nothing stored the global picker wins, which
+ * is what every topic does until it is told otherwise.
+ */
+function loadIntoPlayer(segments) {
+  const { voiceId, rate } = prefsForTopic(settings.topicPrefs, state.route.topic, settings);
+  player.load(segments, chooseBackend(voiceId));
+  player.setRate(rate);
+  return rate;
+}
+
+/** The second server voice, for quoted material. Any voice but the first. */
+function quoteVoiceFor(voiceId) {
+  const other = state.serverVoices.find((v) => v.id !== voiceId);
+  return other ? other.id : '';
+}
+
+function chooseBackend(voiceId = settings.voiceId) {
+  const id = voiceId;
   if (id.startsWith('server:')) {
     const voiceId = id.slice('server:'.length);
     const voice = state.serverVoices.find((v) => v.id === voiceId);
-    if (voice) return new ServerTtsBackend(voice.id, voice.name);
+    if (voice) {
+      return new ServerTtsBackend(voice.id, voice.name,
+                                  { quoteVoiceId: quoteVoiceFor(voice.id) });
+    }
   }
   if (id.startsWith('web:')) {
     const voice = state.voices.find((v) => `web:${v.voiceURI}` === id);
@@ -231,7 +290,8 @@ function chooseBackend() {
   const ranked = rankVoices(state.voices);
   if (ranked.length) return new WebSpeechBackend(ranked[0].voice);
   if (state.serverVoices.length) {
-    return new ServerTtsBackend(state.serverVoices[0].id, state.serverVoices[0].name);
+    const first = state.serverVoices[0];
+    return new ServerTtsBackend(first.id, first.name, { quoteVoiceId: quoteVoiceFor(first.id) });
   }
   return new WebSpeechBackend(null);
 }
@@ -513,8 +573,7 @@ function restorePlayback(checkpointed) {
   // Set before seek(): seek drives onSegment -> updateProgress, which is what
   // renders the label, so the flag has to be true by the time it runs.
   state.resumed = true;
-  player.load(segments, chooseBackend());
-  player.setRate(settings.rate);
+  loadIntoPlayer(segments);
   player.seek(Math.min(checkpointed.segment, segments.length - 1));
 }
 
@@ -885,8 +944,7 @@ function selectDay(dayId, { autoplay = false, resume = false } = {}) {
   state.activeTitle = day.headline || day.day;
   state.activeSubtitle = `${day.day} · ${day.chars} 字`;
 
-  player.load(segments, chooseBackend());
-  player.setRate(settings.rate);
+  loadIntoPlayer(segments);
 
   // Picking a day by hand starts it; coming back to one you were part way
   // through picks up where you stopped.
@@ -954,8 +1012,26 @@ function renderRail() {
   }
 }
 
+/**
+ * How much of the open topic each channel actually wrote.
+ *
+ * The rail lists every channel the same size, which makes a feed contributing
+ * two lines a week look like one carrying the topic. Only meaningful with a
+ * topic open — across all topics at once the shares mean nothing.
+ */
+function shareForCurrentTopic() {
+  const topic = state.route.topic;
+  if (!topic || !state.feed?.digests) return new Map();
+  const sections = state.feed.digests
+    .flatMap((digest) => shapeDigest(digest).topics)
+    .filter((group) => group.topic === topic)
+    .flatMap((group) => group.channels);
+  return new Map(channelShare(sections).map((c) => [c.name, c.share]));
+}
+
 function renderChannelList(channels, filter) {
   const needle = filter.trim().toLowerCase();
+  const shares = shareForCurrentTopic();
   els.channelList.replaceChildren();
   for (const channel of channels) {
     if (needle && !channel.toLowerCase().includes(needle)) continue;
@@ -963,6 +1039,12 @@ function renderChannelList(channels, filter) {
     const a = el('a', null, channel);
     a.href = buildRoute({ view: 'digests', channel });
     if (state.route.channel === channel) a.setAttribute('aria-current', 'page');
+    const share = shares.get(channel);
+    if (share) {
+      li.classList.add('share');
+      li.style.setProperty('--share', `${Math.round(share * 100)}%`);
+      a.title = `佔「${state.route.topic}」約 ${Math.round(share * 100)}%`;
+    }
     li.appendChild(a);
     els.channelList.appendChild(li);
   }
@@ -1281,14 +1363,7 @@ async function setupVoices() {
   }
 
   if (!settings.voiceId) {
-    // An on-device Cantonese voice wins — except where it cannot outlive a
-    // locked screen. There the server's voice is worth a round trip on the
-    // first clip, because it is the only one that reads to the end.
-    const serveInstead = state.serverVoices.length
-      && (!ranked.length || speechStopsInBackground());
-    settings.voiceId = serveInstead
-      ? `server:${state.serverVoices[0].id}`
-      : (ranked.length ? `web:${ranked[0].voice.voiceURI}` : '');
+    settings.voiceId = chooseVoiceId(ranked, state.serverVoices, speechStopsInBackground());
   }
   els.voiceSelect.value = settings.voiceId;
   if (els.voiceSelect.value !== settings.voiceId && els.voiceSelect.options.length) {
@@ -1406,6 +1481,8 @@ async function refreshNow({ auto = false } = {}) {
   } else {
     hideBanner();
   }
+  warnAboutDarkFeeds();
+  prewarm();
   scheduleUpstreamPoll();
 }
 
@@ -1436,6 +1513,7 @@ els.rateSelect.value = String(settings.rate);
 els.rateSelect.addEventListener('change', () => {
   settings.rate = Number(els.rateSelect.value);
   localStorage.setItem('tamchai.rate', String(settings.rate));
+  rememberForTopic();
   player.setRate(settings.rate);
   // setRate only restarts the segment while playing; when stopped the read-out
   // would otherwise keep quoting the old speed's running time.
@@ -1451,6 +1529,91 @@ function retimeDayCards() {
   }
 }
 
+// ------------------------------------------------------- 讀音 / 存檔 / 訊源
+
+els.lexicon.value = settings.lexicon;
+showLexiconCount();
+
+els.lexicon.addEventListener('input', () => {
+  settings.lexicon = els.lexicon.value;
+  try { localStorage.setItem('tamchai.lexicon', settings.lexicon); } catch { /* private */ }
+  setUserLexicon(parseLexicon(settings.lexicon));
+  showLexiconCount();
+});
+
+function showLexiconCount() {
+  const rules = parseLexicon(settings.lexicon);
+  els.lexiconNote.textContent = rules.length ? `${rules.length} 條讀音，下一段開始生效。` : '';
+  els.lexiconNote.hidden = !rules.length;
+}
+
+els.exportArchive.addEventListener('click', () => {
+  // A plain navigation, so the browser's own download UI handles it and a
+  // large archive never has to sit in a blob in memory first.
+  location.href = '/api/archive.tar.gz';
+});
+
+/**
+ * Say when a source has gone quiet without going wrong.
+ *
+ * This is the failure that hides: upstream reports the feed as fine, it simply
+ * has not produced anything, and the digests stop mentioning it. Silence reads
+ * as "nothing happened" when it means "nobody looked".
+ */
+/**
+ * Record whether this topic held you, and say so once it plainly has not.
+ *
+ * Taste, inferred rather than asked for. Three stops in a row on the same topic
+ * is a preference; finishing anything on it clears the streak, so one dull
+ * morning about something you otherwise want does not demote it. The app only
+ * ever offers — nothing is hidden without being agreed to.
+ */
+function noteTopicInterest(finished) {
+  const topic = state.route.topic;
+  if (!topic) return;
+  const before = boredTopics(settings.skips);
+  settings.skips = noteSkip(settings.skips, topic, finished);
+  writeJson('tamchai.skips', settings.skips);
+  const now = boredTopics(settings.skips);
+  if (now.includes(topic) && !before.includes(topic)) {
+    showBanner(`你連續跳過「${topic}」幾次 — 想喺自動播放跳過佢，喺主題度撳一下就得。`,
+               false, { seconds: 9 });
+  }
+}
+
+function warnAboutDarkFeeds() {
+  const dark = darkFeeds(state.feed?.feeds || []);
+  if (!dark.length) return;
+  showBanner(`${darkSummary(dark)}。`, true, { seconds: 10 });
+}
+
+/**
+ * Fetch the opening segments of the top clip once upstream has new material.
+ *
+ * The first press of ▶ on the server voice waits for a synthesis that has not
+ * started yet. The page already knows when upstream is due, so the work can be
+ * done before it is asked for — but only while the tab is visible, because a
+ * backgrounded tab pre-warming a cache is just someone else's battery.
+ */
+function prewarm() {
+  if (document.visibilityState !== 'visible') return;
+  if (!state.playables?.length) return;
+  const { voiceId, rate } = prefsForTopic(settings.topicPrefs, state.route.topic, settings);
+  // Build the backend rather than borrowing the player's: the player has none
+  // until something has been played, and the whole point is to be ready
+  // *before* the first press. Only the server voice fetches anything — the
+  // browser voices synthesise locally and their prefetch is a deliberate no-op,
+  // so asking them to warm up would be pure noise.
+  if (!voiceId.startsWith('server:')) return;
+  const next = state.playables.find((item) => state.listens.stateOf(item.id) !== 'listened');
+  if (!next?.text) return;
+  const backend = chooseBackend(voiceId);
+  const { segments } = prepare(next.text);
+  for (const segment of segments.slice(0, 2)) {
+    try { backend.prefetch(segment, { rate }); } catch { /* best effort */ }
+  }
+}
+
 els.ttsTokenButton.addEventListener('click', () => {
   const given = prompt('伺服器朗讀密碼', '');
   if (given === null) return;                 // cancelled: leave what is there
@@ -1461,7 +1624,8 @@ els.ttsTokenButton.addEventListener('click', () => {
 els.voiceSelect.addEventListener('change', () => {
   settings.voiceId = els.voiceSelect.value;
   localStorage.setItem('tamchai.voice', settings.voiceId);
-  player.setBackend(chooseBackend());
+  rememberForTopic();
+  player.setBackend(chooseBackend(settings.voiceId));
   if (settings.voiceId.startsWith('web:') && speechStopsInBackground()) {
     showBanner('瀏覽器語音熄咗螢幕就會停。想鎖住部機都繼續播，揀返「伺服器」嗰把。', false, { seconds: 8 });
   }
@@ -1502,7 +1666,13 @@ els.clearListened.addEventListener('click', () => {
 els.toggle.addEventListener('click', () => { state.touched = true; player.toggle(); checkpoint(); });
 els.prev.addEventListener('click', () => { userDrives(); player.prev(); });
 els.next.addEventListener('click', () => { userDrives(); player.next(); });
-els.stop.addEventListener('click', () => { state.touched = true; checkpoint(); player.stop(); });
+els.stop.addEventListener('click', () => {
+  // Stopping partway is the one preference given without being asked for.
+  if (player.status === 'playing') noteTopicInterest(false);
+  state.touched = true;
+  checkpoint();
+  player.stop();
+});
 
 els.progress.addEventListener('click', (event) => {
   const segments = state.segments;
@@ -1571,6 +1741,7 @@ document.addEventListener('keydown', (event) => {
     state.config = { tts_voices: [] };
   }
   restoreTtsToken();
+  els.exportArchive.hidden = !state.config.archive;
   await setupVoices();
   if (!location.hash) location.hash = buildRoute({ view: 'digests' });
   state.route = parseRoute(location.hash);
@@ -1580,4 +1751,5 @@ document.addEventListener('keydown', (event) => {
   // The daily view resumes itself inside selectDay, which owns the reader.
   const saved = state.listens.playback;
   if (isResumable(saved) && state.route.view !== 'daily') restorePlayback(saved);
+  warnAboutDarkFeeds();
 })();
