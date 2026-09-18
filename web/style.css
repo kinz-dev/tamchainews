@@ -93,6 +93,11 @@ a { color: inherit; }
 .icon-button.primary { background: var(--accent); color: #11151c; border-color: var(--accent); font-weight: 700; }
 .icon-button:disabled { opacity: 0.4; cursor: default; border-color: var(--border); }
 
+/* Only ever shown when the server voice wants a token, so it reads as a
+   gap to fill until it is filled, and stops shouting once it is. */
+.tts-token { font-size: 12px; border-color: var(--accent); }
+.tts-token.set { border-color: var(--border); color: var(--text-dim); }
+
 .rail-toggle { display: none; }
 
 /* ------------------------------------------------------------------ banner */

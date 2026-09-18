@@ -163,6 +163,11 @@ export class WebSpeechBackend {
   }
 }
 
+let ttsToken = '';
+
+/** The shared secret for /api/tts, if this install wants one. */
+export function setTtsToken(token) { ttsToken = token || ''; }
+
 export class ServerTtsBackend {
   constructor(voiceId, label) {
     this.voiceId = voiceId;
@@ -180,6 +185,10 @@ export class ServerTtsBackend {
       voice: this.voiceId,
       rate: `${sign}${Math.abs(percent)}%`,
     });
+    // An <audio> element cannot send a header, so the token travels in the
+    // query string or not at all. It is the same string either way; what keeps
+    // it off a stranger's screen is that the server never hands it out.
+    if (ttsToken) params.set('token', ttsToken);
     return `/api/tts?${params}`;
   }
 

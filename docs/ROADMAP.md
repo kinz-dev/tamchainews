@@ -10,7 +10,7 @@ new storage or a second process is a different kind of day.
 
 | Day | Theme | Why it is here |
 |---|---|---|
-| **0** | 鎖門 · Close the door | One-line risk. Do it first if the funnel is ever on. |
+| ~~**0**~~ | ~~鎖門 · Close the door~~ | **Done.** Token, per-caller budget, and the forwarded-address trap that made both meaningful. |
 | **1** | 好聽啲 · Make it sound better | Four small changes in `web/`, all audible within a minute of opening the page. |
 | **2** | 今日有咩唔同 · The delta read | The one feature that turns a re-read into news. |
 | **3** | 出街 · Get it off the laptop | A podcast feed reaches the car, the kitchen and everyone who will never install a PWA. |
@@ -18,7 +18,7 @@ new storage or a second process is a different kind of day.
 
 ---
 
-## Day 0 · 鎖門
+## Day 0 · 鎖門 — ✅ done
 
 **Auth and a rate limit on `/api/tts`.** — S
 
@@ -33,14 +33,31 @@ of leaving it open is not bandwidth: it is that somebody else's abuse gets **thi
 box's IP** rate-limited or blocked by Microsoft, with nobody to appeal to. 朗讀
 would simply stop working one morning.
 
-- A shared token in `config.json`, sent as a header or a query key, checked in `_api_tts`.
-- A per-IP token bucket — a dict and a timestamp, nothing more.
-- Loopback and tailnet ranges exempt, so nothing changes on the laptop.
+Shipped:
 
-**Done when** the funnel URL answers `/api/tts` with 401 and the tailnet one still speaks.
+- `tts_token`, checked with `hmac.compare_digest`, accepted as a header or — because
+  `<audio src>` can carry nothing else — as a query key.
+- `CharBudget`: a per-caller budget in **characters**, since characters are what
+  Microsoft meters. 60,000/hour against a 20,000 burst. A cache hit is never
+  charged, so the budget measures exactly what leaves the box.
+- Loopback and the tailnet skip both.
+- `/api/speech-token`, dormant until `azure_key` and `azure_region` are set.
 
-Skip this day entirely if the funnel is off and staying off — but then say so in
-the README, because "no auth" and "not exposed" are two different claims.
+**The bit that made it real:** `serve` and `funnel` proxy to loopback, so the
+socket says 127.0.0.1 for the entire public internet — the first cut exempted
+every outside caller as "the owner". `client_ip()` reads `X-Forwarded-For` only
+when the peer is itself loopback; from anyone else it is a header the caller
+writes, and trusting it would hand a stranger the tailnet's exemption.
+
+**Verified** against a live server: loopback passes untouched; a forwarded
+stranger gets 401 without the token, 200 with it, then 429 and a `Retry-After`
+once the budget is spent; a second address is unaffected; a repeat of
+already-synthesised text is free. 15 unit tests in `tests/test_server.py`.
+
+**What it is not.** The page is still unauthenticated, and a token in a query
+string is a token in a server log. Anyone who can load a funnelled page can read
+its `localStorage`. The token stops drive-by use of the endpoint; the thing that
+actually bounds a public URL is the budget, which needs no secret at all.
 
 ---
 
@@ -132,7 +149,22 @@ segments, concatenates them, and writes one MP3 beside the day's JSON.
 *Done when* the URL subscribes cleanly in Apple Podcasts and Pocket Casts, and
 yesterday's episode is there before breakfast.
 
-**2. `/api/stream.mp3`** — M · *only if Day 3 has room*
+**2. Azure Speech, client-direct** — M · *the server half is already in*
+
+`/api/speech-token` exists and mints a ten-minute token; what is left is the
+browser half — a third back-end in `player.js` beside `WebSpeechBackend` and
+`ServerTtsBackend`, talking to Azure itself. Needs a real key and region to
+build against, because whether the REST endpoint answers a browser directly or
+wants the Speech SDK is not something worth guessing at.
+
+This is the topology that was asked for and edge-tts cannot express: abuse
+spends the token's own quota, not this box's standing. It also makes the Day 0
+budget a courtesy rather than a defence.
+
+*Done when* a browser with no Cantonese voice reads aloud without `/api/tts`
+being touched at all.
+
+**3. `/api/stream.mp3`** — M · *only if Day 3 has room*
 
 The unheard queue, concatenated on the fly. Anything that can open a URL — a
 Sonos, a car, a dumb speaker — becomes a client. Shares the concatenation code
@@ -183,6 +215,22 @@ and any one of them would eat all four days.
 | AI 主播對談 | Wants Day 3's audio pipeline finished first. |
 | Cross-device resume | Wants accounts, which this app has deliberately never had. |
 | Local Piper / Kokoro | Wants a second process and a model file in the image — but it is the only entry here that makes the server path actually local, and the only insurance against Microsoft closing the door. |
+
+### Not doing: a bigger TTS cache
+
+Raised and rejected, so it does not get raised again. The cache key is
+`sha1(voice|rate|text)`, so a caller sending fresh text misses **by
+construction** — hit rate against abuse is zero at any size, and a bigger LRU
+would only churn harder. For real traffic it is already ample: 每日總覽 measures
+3,310 chars/day ≈ 4.4 MB of 48 kbps mono, so 64 MB is about fifteen days' worth
+and evicts nothing that matters. Meanwhile the container is capped at 256 MB
+against a process that reaches ~56 MiB, and Day 1's per-topic voice and rate
+multiply the key space rather than shrink it.
+
+The useful version is a **disk-backed** store, not a bigger memory one: a year
+of daily summaries is 1.6 GB, it survives the rebuilds that editing `web/`
+forces, and it is the same pre-rendered audio Day 3's podcast feed needs. It is
+folded into Day 3 rather than standing alone.
 
 ## 記住
 

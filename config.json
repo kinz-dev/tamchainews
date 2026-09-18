@@ -6,5 +6,12 @@
   "chars_per_second": 4.5,
 
   "host": "127.0.0.1",
-  "port": 8082
+  "port": 8082,
+
+  "tts_token": "",
+  "tts_burst_chars": 20000,
+  "tts_chars_per_hour": 60000,
+
+  "azure_key": "",
+  "azure_region": ""
 }
