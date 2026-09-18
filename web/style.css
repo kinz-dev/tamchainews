@@ -140,6 +140,16 @@ a { color: inherit; }
   color: var(--text-faint); margin: 0 0 7px; padding: 0 10px; font-weight: 600;
 }
 .rail-count { color: var(--text-faint); font-weight: 400; letter-spacing: 0; text-transform: none; }
+/* Lit only while something from the last four hours is still unheard, so it
+   reads as a standing invitation rather than a permanent decoration. */
+.rail-new {
+  display: inline-block; vertical-align: middle;
+  margin-left: 2px; padding: 1px 7px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0; text-transform: none;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--accent-soft); border-radius: 999px;
+}
+.rail-new[hidden] { display: none; }
 
 .rail-field {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;

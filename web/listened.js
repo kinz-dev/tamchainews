@@ -74,6 +74,27 @@ export function advance(previous, { segment, total, title }) {
   });
 }
 
+/**
+ * The listen IDs a shaped digest is answerable for.
+ *
+ * The highlights and the topic blocks, but not the channels underneath them:
+ * playing a topic marks its channels heard, and hearing every channel marks
+ * the topic, so the topic level already speaks for both. Counting the channels
+ * as well would leave a digest looking unheard after it had been read end to
+ * end through its topic blocks.
+ */
+export function digestListenIds(shaped) {
+  const ids = [];
+  if (shaped.highlights) ids.push(idFor.digestHighlights(shaped.id));
+  for (const group of shaped.topics || []) ids.push(idFor.digestTopic(shaped.id, group.topic));
+  return ids;
+}
+
+/** Is any of this still unheard? Part-heard counts: you have not finished it. */
+export function anyUnheard(ids = [], records = new Map()) {
+  return ids.some((id) => stateOf(records.get(id)) !== 'listened');
+}
+
 /** Counts for the read-out: how much of what is on screen has been heard. */
 export function tally(ids, records) {
   let listened = 0;

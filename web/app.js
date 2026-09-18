@@ -8,16 +8,16 @@
 import { prepare, estimateSeconds } from './speech.js';
 import {
   Player, WebSpeechBackend, ServerTtsBackend,
-  loadVoices, rankVoices, installVoiceHint,
+  loadVoices, rankVoices, installVoiceHint, speechStopsInBackground, clips,
 } from './player.js';
 import {
-  shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts,
+  shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts, recentlyAdded,
   hostOf, relativeTime, clockTime, formatClock,
   parseRoute, buildRoute, routeToParams, RANGES,
 } from './feed.js';
 import {
   ListenStore, idFor, stateOf, percentOf, tally, isResumable, resumePoint, parseDailyId,
-  nextPlayable, kindOf, containedBy, allContainedHeard,
+  nextPlayable, kindOf, containedBy, allContainedHeard, digestListenIds, anyUnheard,
 } from './listened.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,6 +31,7 @@ const els = {
   listenTally: $('listen-tally'), hideListened: $('hide-listened'),
   autoplayNext: $('autoplay-next'),
   clearListened: $('clear-listened'), listenNote: $('listen-note'),
+  topicNew: $('topic-new'),
   crumbs: $('crumbs'), statusStrip: $('status-strip'), view: $('view'),
   pager: $('pager'), pagePrev: $('page-prev'), pageNext: $('page-next'), pageLabel: $('page-label'),
   playerbar: $('playerbar'), nowTitle: $('now-title'), nowSub: $('now-sub'),
@@ -41,6 +42,7 @@ const els = {
 
 const state = {
   route: parseRoute(location.hash),
+  recentIds: [],        // listen keys of everything added in the last 4 hours
   feed: null,           // last /api/feed payload
   daily: null,          // last /api/daily payload
   config: null,
@@ -80,7 +82,9 @@ const player = new Player({
     if (status === 'playing') {
       state.resumed = false;
       state.touched = true;
+      publishNowPlaying();
     }
+    setPlaybackState(status);
     els.toggle.textContent = status === 'playing' ? '⏸' : '▶';
     if (state.activeSource) {
       state.activeSource.setAttribute('aria-pressed', String(status === 'playing'));
@@ -98,6 +102,55 @@ const player = new Player({
   },
   onError: (error) => showBanner(`播放失敗：${error.message}`, true),
 });
+
+// ------------------------------------------------------- lock screen
+
+// What the phone shows while the screen is off, and the buttons it offers
+// there. Only the served voice puts anything on an <audio> element for iOS to
+// hang this on; with the browser's voice the controls simply never appear,
+// which is the honest outcome — there is nothing there to control.
+const ARTWORK = [
+  { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },
+  { src: 'icon-512.png', sizes: '512x512', type: 'image/png' },
+];
+
+function publishNowPlaying() {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: state.activeTitle || '朗讀中',
+    artist: state.activeSubtitle || '譚仔新聞',
+    album: '譚仔新聞',
+    artwork: ARTWORK,
+  });
+}
+
+function setPlaybackState(status) {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.playbackState =
+    status === 'playing' ? 'playing' : status === 'paused' ? 'paused' : 'none';
+}
+
+if ('mediaSession' in navigator) {
+  const actions = {
+    play: () => { if (player.status !== 'playing') player.toggle(); },
+    pause: () => player.pause(),
+    previoustrack: () => { userDrives(); player.prev(); },
+    nexttrack: () => { userDrives(); player.next(); },
+    stop: () => { checkpoint(); player.stop(); },
+  };
+  for (const [action, handler] of Object.entries(actions)) {
+    // Safari rejects actions it has no button for; that is not our problem.
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* unsupported */ }
+  }
+}
+
+// iOS hands out playback permission one element at a time and only from a real
+// tap. Spend the first tap of the session on both halves of the clip pair, so
+// that the hand-off in the middle of an article — where there is no gesture to
+// ask with, and a refusal ends the reading — has nothing left to ask for.
+for (const event of ['pointerdown', 'keydown']) {
+  document.addEventListener(event, () => clips.unlock(), { capture: true });
+}
 
 /** Speak an arbitrary run of text, tracked against the button that asked for it. */
 function speakText(text, { title = '', subtitle = '', button = null, id = '' } = {}) {
@@ -245,6 +298,7 @@ function refreshListenMarks() {
   }
   applyListenFilter();
   renderListenTally();
+  refreshNewBadge();
 }
 
 /** 只顯示未聽: hide the channel blocks whose summary has been heard. */
@@ -263,6 +317,46 @@ function applyListenFilter() {
     const emptied = groups.length > 0 && groups.every((g) => g.hidden);
     digest.hidden = hide && emptied && digest.classList.contains('is-listened');
   }
+}
+
+// ------------------------------------------------------------- what's new
+
+// The 新 badge answers one question: has anything arrived in the last four
+// hours that you have not heard yet?
+//
+// Deliberately not measured against what is on screen. /api/feed narrows to
+// the current topic, channel, date and page, and an answer that changed
+// because you happened to be reading one topic would be worthless — so it is
+// measured against the unfiltered newest page, which is where the last four
+// hours live whatever the rail is filtered to.
+const RECENT_TTL_MS = 60_000;
+let recentFetchedAt = 0;
+
+function isUnfiltered({ topic, channel, date, last, page }) {
+  return !topic && !channel && !date && !last && page === 1;
+}
+
+async function trackRecent({ force = false } = {}) {
+  let digests = null;
+  if (isUnfiltered(state.route) && state.feed?.digests) {
+    digests = state.feed.digests;                      // load() just fetched exactly this
+  } else if (force || Date.now() - recentFetchedAt > RECENT_TTL_MS) {
+    // Stale beats wrong: a failed fetch leaves the previous answer standing
+    // rather than clearing a badge that may well still be earned.
+    try { digests = (await fetchJson('/api/feed')).digests || []; } catch { digests = null; }
+  }
+  if (digests) {
+    recentFetchedAt = Date.now();
+    state.recentIds = recentlyAdded(digests)
+      .flatMap((digest) => digestListenIds(shapeDigest(digest)));
+  }
+  refreshNewBadge();
+}
+
+/** Repaint from what is already known — no network, so it can run per segment. */
+function refreshNewBadge() {
+  if (!els.topicNew) return;
+  els.topicNew.hidden = !anyUnheard(state.recentIds, state.listens?.records);
 }
 
 function renderListenTally() {
@@ -1133,7 +1227,11 @@ async function setupVoices() {
     for (const { voice, local } of ranked) {
       const option = document.createElement('option');
       option.value = `web:${voice.voiceURI}`;
-      option.textContent = `${voice.name}${local ? '' : '（雲端）'}`;
+      // Whichever way it falls, say it where the choice is made: on iOS every
+      // browser voice dies with the screen, and that matters more than where
+      // the synthesis happens.
+      const caveat = speechStopsInBackground() ? '（鎖屏會停）' : (local ? '' : '（雲端）');
+      option.textContent = `${voice.name}${caveat}`;
       group.appendChild(option);
     }
     els.voiceSelect.appendChild(group);
@@ -1151,10 +1249,14 @@ async function setupVoices() {
   }
 
   if (!settings.voiceId) {
-    // An on-device Cantonese voice wins; otherwise fall back to the server's.
-    settings.voiceId = ranked.length ? `web:${ranked[0].voice.voiceURI}` : (
-      state.serverVoices.length ? `server:${state.serverVoices[0].id}` : ''
-    );
+    // An on-device Cantonese voice wins — except where it cannot outlive a
+    // locked screen. There the server's voice is worth a round trip on the
+    // first clip, because it is the only one that reads to the end.
+    const serveInstead = state.serverVoices.length
+      && (!ranked.length || speechStopsInBackground());
+    settings.voiceId = serveInstead
+      ? `server:${state.serverVoices[0].id}`
+      : (ranked.length ? `web:${ranked[0].voice.voiceURI}` : '');
   }
   els.voiceSelect.value = settings.voiceId;
   if (els.voiceSelect.value !== settings.voiceId && els.voiceSelect.options.length) {
@@ -1222,6 +1324,7 @@ async function load({ force = false } = {}) {
   else await renderDigestsView();
 
   refreshListenMarks();
+  await trackRecent({ force });
   scheduleUpstreamPoll();
 }
 
@@ -1320,6 +1423,9 @@ els.voiceSelect.addEventListener('change', () => {
   settings.voiceId = els.voiceSelect.value;
   localStorage.setItem('tamchai.voice', settings.voiceId);
   player.setBackend(chooseBackend());
+  if (settings.voiceId.startsWith('web:') && speechStopsInBackground()) {
+    showBanner('瀏覽器語音熄咗螢幕就會停。想鎖住部機都繼續播，揀返「伺服器」嗰把。', false, { seconds: 8 });
+  }
 });
 
 els.channelFilter.addEventListener('input', () => {

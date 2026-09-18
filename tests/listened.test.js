@@ -4,6 +4,7 @@ import {
   idFor, makeRecord, stateOf, ratioOf, percentOf, advance, tally, DONE_RATIO,
   makeCheckpoint, isResumable, RESUME_MAX_AGE_MS, resumePoint, parseDailyId,
   kindOf, nextPlayable, isLeaf, containedBy, allContainedHeard,
+  digestListenIds, anyUnheard,
 } from '../web/listened.js';
 
 test('ids are stable and distinguish the thing being listened to', () => {
@@ -205,4 +206,49 @@ test('nextPlayable treats part-heard as still to play', () => {
   const playables = [{ id: 'digest:75:channel:a' }, { id: 'digest:75:channel:b' }];
   const partial = new Map([['digest:75:channel:b', makeRecord({ id: 'digest:75:channel:b', segment: 3, total: 10 })]]);
   assert.equal(nextPlayable(playables, 'digest:75:channel:a', partial).id, 'digest:75:channel:b');
+});
+
+// ------------------------------------------------------------ what's new
+
+const SHAPED = {
+  id: '92',
+  highlights: '重點內容',
+  topics: [
+    { topic: 'Science', channels: [{ channel: 'Physics World', summary: '一' }] },
+    { topic: 'Sport', channels: [{ channel: 'BBC Sport', summary: '二' }] },
+  ],
+};
+
+test('a digest answers for its highlights and topics, not its channels', () => {
+  // Channels roll up: playing a topic marks them heard and hearing them all
+  // marks the topic, so counting both would keep a fully-heard digest lit.
+  assert.deepEqual(digestListenIds(SHAPED), [
+    'digest:92:highlights',
+    'digest:92:topic:Science',
+    'digest:92:topic:Sport',
+  ]);
+});
+
+test('a digest with no highlights contributes only its topics', () => {
+  assert.deepEqual(digestListenIds({ id: '7', highlights: '', topics: [{ topic: 'AI', channels: [] }] }),
+                   ['digest:7:topic:AI']);
+  assert.deepEqual(digestListenIds({ id: '7', highlights: '' }), []);
+});
+
+test('the badge clears only once every recent block is finished', () => {
+  const ids = digestListenIds(SHAPED);
+  const records = new Map();
+  assert.equal(anyUnheard(ids, records), true, 'nothing heard yet');
+
+  for (const id of ids) records.set(id, makeRecord({ id, done: true }));
+  assert.equal(anyUnheard(ids, records), false, 'all heard');
+
+  // Part-heard is not heard: you have not finished it, so it still counts.
+  records.set('digest:92:topic:Sport', makeRecord({ id: 'digest:92:topic:Sport', segment: 3, total: 10 }));
+  assert.equal(anyUnheard(ids, records), true);
+});
+
+test('nothing recent means nothing to flag', () => {
+  assert.equal(anyUnheard([], new Map()), false);
+  assert.equal(anyUnheard(), false);
 });

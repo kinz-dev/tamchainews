@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Player, rankVoices, installVoiceHint } from '../web/player.js';
+import { Player, rankVoices, installVoiceHint, speechStopsInBackground } from '../web/player.js';
 import { prepare } from '../web/speech.js';
 
 /** Stands in for a speech engine: records what it was asked to say. */
@@ -206,4 +206,53 @@ test('the install hint is tailored to the platform', () => {
   assert.match(installVoiceHint('… (Linux; Android 14) Chrome', 'Linux armv8l'), /文字轉語音/);
   assert.match(installVoiceHint('… (X11; Linux x86_64; rv:130.0) Gecko Firefox/130.0', 'Linux x86_64'), /speech-dispatcher/);
   assert.equal(installVoiceHint('… (X11; Linux x86_64) Chrome/140', 'Linux x86_64'), '');
+});
+
+// ---------------------------------------------------- background playback
+
+test('a segment is claimed before the next one is prefetched', async () => {
+  // The audio backend parks the lookahead on whichever element is idle, so
+  // prefetching ahead of speak() would overwrite the clip about to be played.
+  const order = [];
+  const { segments } = prepare('一。二。三。');
+  const player = new Player();
+  player.load(segments, {
+    speak: () => { order.push('speak'); return Promise.resolve(); },
+    prefetch: (segment) => { if (segment) order.push('prefetch'); },
+    cancel() {}, pause: () => true, resume() {}, dispose() {},
+  });
+  player.rate = 100;
+  player.play(0);
+  await until(() => player.status === 'idle', 'the queue to drain');
+  assert.deepEqual(order.slice(0, 4), ['speak', 'prefetch', 'speak', 'prefetch']);
+});
+
+test('the gap between segments is dropped while the page is hidden', async () => {
+  // A locked iPhone suspends the page moments after the audio falls silent;
+  // a timer waited out there is the one that never comes back.
+  const { segments } = prepare('一。二。');
+  const player = new Player();
+  player.load(segments, {
+    speak: () => Promise.resolve(),
+    prefetch() {}, cancel() {}, pause: () => true, resume() {}, dispose() {},
+  });
+  globalThis.document = { hidden: true };
+  try {
+    const started = Date.now();
+    player.play(0);
+    await until(() => player.status === 'idle', 'the queue to drain');
+    // Two segments of 320ms of gap each would be well past this at rate 1.
+    assert.ok(Date.now() - started < 200, 'hidden playback waited out a gap');
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+test('iOS is known to cut the browser voice off, other platforms are not', () => {
+  const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/605.1';
+  assert.equal(speechStopsInBackground(iphone, 'iPhone', 5), true);
+  const mac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1';
+  assert.equal(speechStopsInBackground(mac, 'MacIntel', 0), false);
+  // An iPad reports itself as a Mac, and does stop.
+  assert.equal(speechStopsInBackground(mac, 'MacIntel', 5), true);
 });
