@@ -99,6 +99,27 @@ The page turns each digest's Markdown into short spoken segments and plays them 
 at a time, which gives sentence-level seek, resume-where-you-left-off, and a progress
 bar — and sidesteps Chrome's habit of truncating long utterances.
 
+### How far back
+
+Upstream answers for one day unless told otherwise. The rail's **日期** section
+sets that for every view at once, and it lives in the URL like the other
+filters, so `#/digests?last=5d` is a link:
+
+| Control | |
+|---|---|
+| **範圍** — 今日 / 3 天 / 5 天 | `last=3d`, in one upstream request |
+| **指定日期** | `date=2026-09-16`, one named day |
+
+A chosen date wins over the range upstream-side, so the app sends only the date
+and greys the range out rather than letting it be silently ignored.
+
+`last` widens the digest stream — the same query goes from 35 to 115 digests
+across 1, 3 and 5 days, paginated as usual — but upstream returns the same
+scheduled reports whichever range is asked for. `date` narrows both.
+
+每日總覽 is the one view with its own history: the archive holds days upstream
+has dropped, so the range filters that list rather than just fetching more.
+
 ### Views
 
 | | |

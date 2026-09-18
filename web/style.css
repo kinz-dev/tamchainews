@@ -141,6 +141,17 @@ a { color: inherit; }
 }
 .rail-count { color: var(--text-faint); font-weight: 400; letter-spacing: 0; text-transform: none; }
 
+.rail-field {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 3px 10px; font-size: 13px; color: var(--text-dim);
+}
+.rail-field select, .rail-field input {
+  font: inherit; font-size: 12px; padding: 3px 6px; max-width: 132px;
+  color: var(--text); background: var(--bg-sunken);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.rail-field select:disabled { opacity: 0.45; }
+
 .rail-search {
   font: inherit; font-size: 13px; width: 100%; padding: 6px 10px; margin: 0 0 6px;
   color: var(--text); background: var(--bg-sunken);

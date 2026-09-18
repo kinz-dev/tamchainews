@@ -136,9 +136,13 @@ test('relativeTime speaks Cantonese units', () => {
 });
 
 test('parseRoute and buildRoute round-trip', () => {
-  const route = { view: 'digests', topic: 'AI', channel: '', page: 3 };
+  const route = { view: 'digests', topic: 'AI', channel: '', page: 3, last: '', date: '' };
   assert.equal(buildRoute(route), '#/digests?topic=AI&page=3');
   assert.deepEqual(parseRoute('#/digests?topic=AI&page=3'), route);
+
+  const windowed = { view: 'daily', topic: '', channel: '', page: 1, last: '5d', date: '2026-09-16' };
+  assert.equal(buildRoute(windowed), '#/daily?last=5d&date=2026-09-16');
+  assert.deepEqual(parseRoute('#/daily?last=5d&date=2026-09-16'), windowed);
 });
 
 test('parseRoute defaults an unknown view to digests', () => {
@@ -151,4 +155,26 @@ test('routeToParams maps the route onto upstream parameter names', () => {
   assert.equal(routeToParams({ topic: 'Daily Summary', page: 1 }).toString(), 'topics=Daily+Summary');
   assert.equal(routeToParams({ channel: 'r/technology', page: 2 }).toString(), 'channel=r%2Ftechnology&page=2');
   assert.equal(routeToParams({}).toString(), '');
+});
+
+test('the route carries the range and the chosen date', () => {
+  assert.equal(buildRoute({ view: 'daily', last: '3d' }), '#/daily?last=3d');
+  assert.equal(buildRoute({ view: 'digests', topic: 'AI', date: '2026-09-16' }),
+    '#/digests?topic=AI&date=2026-09-16');
+  const route = parseRoute('#/digests?topic=AI&last=5d&date=2026-09-16');
+  assert.equal(route.last, '5d');
+  assert.equal(route.date, '2026-09-16');
+});
+
+test('a range or date the app does not offer is ignored', () => {
+  assert.equal(parseRoute('#/daily?last=99d').last, '', 'not one of the offered ranges');
+  assert.equal(parseRoute('#/daily?date=16-09-2026').date, '', 'not an ISO date');
+  assert.equal(parseRoute('#/daily').last, '');
+});
+
+test('a chosen date replaces the range, because upstream lets date win', () => {
+  assert.equal(routeToParams({ last: '3d' }).toString(), 'last=3d');
+  assert.equal(routeToParams({ date: '2026-09-16' }).toString(), 'date=2026-09-16');
+  // Sending both would silently drop the range; only the date goes.
+  assert.equal(routeToParams({ last: '5d', date: '2026-09-16' }).toString(), 'date=2026-09-16');
 });

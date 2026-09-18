@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import hashlib
 import json
 import mimetypes
@@ -73,7 +74,20 @@ FEED_CACHE_MAX_ENTRIES = 128
 # Upstream query parameters the browser is allowed to pass through. Anything
 # else is dropped rather than forwarded, so /api/feed can't be used to probe
 # the upstream with arbitrary arguments.
-FEED_PARAMS = ("topics", "channel", "page", "date")
+FEED_PARAMS = ("topics", "channel", "page", "date", "last")
+
+# How far back to ask for: upstream answers for one day unless told otherwise,
+# and widens the whole response — digests, tasks and daily alike — in a single
+# request. `date` names one day instead and wins over it.
+FEED_LAST_PATTERN = re.compile(r"\d{1,2}[dh]")
+FEED_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def days_in(last: str) -> int:
+    """How many days `last` covers: "3d" -> 3, "8h" -> 1, anything else -> 0."""
+    if not FEED_LAST_PATTERN.fullmatch(last or ""):
+        return 0
+    return int(last[:-1]) if last.endswith("d") else 1
 
 
 # -------------------------------------------------------------------------- config
@@ -222,8 +236,11 @@ class Upstream:
 
     # -- the Daily Summary view, which is archived ------------------------
 
-    def daily(self, force: bool = False) -> dict:
-        raw = self.fetch({"topics": "Daily Summary"}, force=force)
+    def daily(self, force: bool = False, window: dict | None = None) -> dict:
+        window = window or {}
+        requested_date = window.get("date", "")
+        requested_days = days_in(window.get("last", ""))
+        raw = self.fetch({"topics": "Daily Summary", **window}, force=force)
         meta = raw.get("_meta", {})
         cps = self._config["chars_per_second"]
         days = [normalise_day(e, cps) for e in raw.get("daily") or []]
@@ -233,6 +250,18 @@ class Upstream:
             self._write_archive(days)
         merged = {d["day"]: d for d in self._read_archive()}
         merged.update({d["day"]: d for d in days})
+
+        # The archive is a supplement, not an override. Left unfiltered it hands
+        # back every day ever seen, which would make both the picker and the
+        # range meaningless — one date would still answer with all of them, and
+        # a wider range would look identical to a narrower one.
+        if requested_date:
+            merged = {day: entry for day, entry in merged.items() if day == requested_date}
+        elif requested_days and merged:
+            newest = max(merged)
+            cutoff = (datetime.date.fromisoformat(newest)
+                      - datetime.timedelta(days=requested_days - 1)).isoformat()
+            merged = {day: entry for day, entry in merged.items() if day >= cutoff}
         return {
             "days": sorted(merged.values(), key=lambda d: d["day"], reverse=True),
             "fetched_at": meta.get("fetched_at", 0.0),
@@ -360,14 +389,29 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:                          # never take the server down
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    @staticmethod
+    def _window_of(query: dict) -> dict:
+        """The `last`/`date` pair, dropped unless they are the shape upstream expects."""
+        window = {}
+        last = (query.get("last") or [""])[0].strip()
+        if FEED_LAST_PATTERN.fullmatch(last):
+            window["last"] = last
+        date = (query.get("date") or [""])[0].strip()
+        if FEED_DATE_PATTERN.fullmatch(date):
+            window["date"] = date
+        return window
+
     def _api_feed(self, query: dict) -> None:
-        params = {name: query[name][0] for name in FEED_PARAMS if query.get(name)}
+        params = {name: query[name][0] for name in FEED_PARAMS
+                  if query.get(name) and name not in ("date", "last")}
+        params.update(self._window_of(query))
         force = query.get("refresh", ["0"])[0] == "1"
         self._send_json(self.upstream.fetch(params, force=force), cache="no-store")
 
     def _api_daily(self, query: dict) -> None:
         force = query.get("refresh", ["0"])[0] == "1"
-        self._send_json(self.upstream.daily(force=force), cache="no-store")
+        self._send_json(self.upstream.daily(force=force, window=self._window_of(query)),
+                        cache="no-store")
 
     def _api_tts(self, query: dict) -> None:
         text = (query.get("text") or [""])[0].strip()

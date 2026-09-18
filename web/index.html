@@ -51,6 +51,19 @@
     </nav>
 
     <div class="rail-section">
+      <h2 class="rail-title">日期</h2>
+      <label class="rail-field">
+        <span>範圍</span>
+        <select id="range-select"></select>
+      </label>
+      <label class="rail-field">
+        <span>指定日期</span>
+        <input id="date-pick" type="date" autocomplete="off">
+      </label>
+      <button id="date-clear" class="rail-button" type="button" hidden>× 清除日期</button>
+    </div>
+
+    <div class="rail-section">
       <h2 class="rail-title">主題</h2>
       <ul id="topic-list" class="rail-list"></ul>
     </div>

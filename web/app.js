@@ -13,7 +13,7 @@ import {
 import {
   shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts,
   hostOf, relativeTime, clockTime, formatClock,
-  parseRoute, buildRoute, routeToParams,
+  parseRoute, buildRoute, routeToParams, RANGES,
 } from './feed.js';
 import {
   ListenStore, idFor, stateOf, percentOf, tally, isResumable, resumePoint, parseDailyId,
@@ -27,6 +27,7 @@ const els = {
   rail: $('rail'), railToggle: $('rail-toggle'), railScrim: $('rail-scrim'),
   topicList: $('topic-list'), channelList: $('channel-list'),
   channelFilter: $('channel-filter'), channelCount: $('channel-count'),
+  rangeSelect: $('range-select'), datePick: $('date-pick'), dateClear: $('date-clear'),
   listenTally: $('listen-tally'), hideListened: $('hide-listened'),
   autoplayNext: $('autoplay-next'),
   clearListened: $('clear-listened'), listenNote: $('listen-note'),
@@ -785,7 +786,24 @@ function playAdjacentDay() {
 
 // ----------------------------------------------------------------- chrome
 
+function renderDateControls() {
+  if (!els.rangeSelect.options.length) {
+    for (const { value, label } of RANGES) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      els.rangeSelect.appendChild(option);
+    }
+  }
+  els.rangeSelect.value = state.route.last;
+  // A chosen date names one day, so the range has nothing left to widen.
+  els.rangeSelect.disabled = Boolean(state.route.date);
+  els.datePick.value = state.route.date;
+  els.dateClear.hidden = !state.route.date;
+}
+
 function renderRail() {
+  renderDateControls();
   const payload = state.feed || {};
   const topics = topicCounts(payload.topics || [], payload.channel_topics || {});
   els.topicList.replaceChildren();
@@ -1165,12 +1183,21 @@ async function load({ force = false } = {}) {
   els.view.replaceChildren(el('p', 'placeholder', '載入中…'));
   try {
     if (view === 'daily') {
-      state.daily = await fetchJson(`/api/daily${force ? '?refresh=1' : ''}`);
+      const dailyParams = routeToParams(state.route);
+      dailyParams.delete('topics');
+      dailyParams.delete('channel');
+      dailyParams.delete('page');
+      if (force) dailyParams.set('refresh', '1');
+      const dailyQuery = dailyParams.toString();
+      state.daily = await fetchJson(`/api/daily${dailyQuery ? `?${dailyQuery}` : ''}`);
       // The rail, the status strip and the "has upstream checked since?" test
       // all read the full feed, so a refresh here has to renew that too — not
       // just the day list.
       if (!state.feed || force) {
-        state.feed = await fetchJson(`/api/feed${force ? '?refresh=1' : ''}`);
+        const railParams = routeToParams(state.route);
+        if (force) railParams.set('refresh', '1');
+        const railQuery = railParams.toString();
+        state.feed = await fetchJson(`/api/feed${railQuery ? `?${railQuery}` : ''}`);
       }
     } else {
       const params = routeToParams(state.route);
@@ -1302,6 +1329,18 @@ els.channelFilter.addEventListener('input', () => {
 els.autoplayNext.addEventListener('change', () => {
   settings.autoplayNext = els.autoplayNext.checked;
   localStorage.setItem('tamchai.autoplayNext', settings.autoplayNext ? '1' : '0');
+});
+
+els.rangeSelect.addEventListener('change', () => {
+  location.hash = buildRoute({ ...state.route, last: els.rangeSelect.value, page: 1 });
+});
+
+els.datePick.addEventListener('change', () => {
+  location.hash = buildRoute({ ...state.route, date: els.datePick.value, page: 1 });
+});
+
+els.dateClear.addEventListener('click', () => {
+  location.hash = buildRoute({ ...state.route, date: '', page: 1 });
 });
 
 els.hideListened.addEventListener('change', () => {
