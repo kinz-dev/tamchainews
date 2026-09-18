@@ -4,6 +4,91 @@
 
 const KEEPALIVE_MS = 9000;
 
+// 50ms of 8-bit silence. Only ever played to spend a user's tap on an element
+// that has nothing else to play yet; see ClipPair.unlock().
+const SILENT_CLIP = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';
+
+/** Off-screen, or off under a test runner that has no document at all. */
+function isHidden() {
+  return typeof document !== 'undefined' && document.hidden === true;
+}
+
+/**
+ * iOS suspends speechSynthesis the moment the screen locks or the tab goes to
+ * the background, and offers nothing to ask it otherwise. A served clip plays
+ * on an <audio> element, which iOS does keep running — so on these devices the
+ * server voice is the only one that can read on past a dark screen.
+ */
+export function speechStopsInBackground(
+  userAgent = navigator.userAgent,
+  platform = navigator.platform,
+  touchPoints = navigator.maxTouchPoints,
+) {
+  return /iPhone|iPad|iPod/.test(userAgent)
+    || (platform === 'MacIntel' && touchPoints > 1);   // iPadOS reports as a Mac
+}
+
+/**
+ * Two <audio> elements, played turn about, shared by every backend that wants
+ * them.
+ *
+ * Both halves of that are deliberate. Turn about, because the hand-off between
+ * clips is the moment a locked iPhone stops the reading: once a clip ends and
+ * nothing is playing, the page is suspended within moments, and an element that
+ * still has to go to the network for its bytes will not get there. Parking the
+ * next clip on the other element one step ahead makes the hand-off a `play()`
+ * on something already in hand.
+ *
+ * Shared, because iOS grants playback permission per element and only from a
+ * real tap. Changing voice builds a new backend, and elements minted with it
+ * would arrive unlocked — so the pair outlives the backends that borrow it.
+ */
+class ClipPair {
+  constructor() {
+    this.elements = null;
+    this.cursor = 0;
+  }
+
+  _build() {
+    if (this.elements) return this.elements;
+    this.elements = [new Audio(), new Audio()];
+    for (const audio of this.elements) {
+      audio.preload = 'auto';
+      audio.clip = null;
+      audio.unlocked = false;
+    }
+    return this.elements;
+  }
+
+  get all() { return this._build(); }
+
+  get current() { return this._build()[this.cursor]; }
+
+  get spare() { return this._build()[1 - this.cursor]; }
+
+  swap() { this.cursor = 1 - this.cursor; }
+
+  /**
+   * Spend a tap on both elements while we have one. The first hand-off in the
+   * middle of an article is exactly where a refusal cannot be recovered from —
+   * there is no gesture there to ask with.
+   */
+  unlock() {
+    for (const audio of this.all) {
+      if (audio.unlocked || !audio.paused) continue;
+      audio.unlocked = true;
+      audio.src = SILENT_CLIP;
+      audio.clip = null;
+      const started = audio.play();
+      if (started?.then) {
+        started.then(() => audio.pause(), () => { audio.unlocked = false; });
+      }
+    }
+  }
+}
+
+export const clips = new ClipPair();
+
 export class WebSpeechBackend {
   static get supported() {
     return typeof speechSynthesis !== 'undefined';
@@ -13,6 +98,7 @@ export class WebSpeechBackend {
     this.voice = voice;
     this.id = `web:${voice?.voiceURI || ''}`;
     this.label = voice ? voice.name : '瀏覽器語音';
+    this.background = !speechStopsInBackground();
     this._keepalive = null;
   }
 
@@ -82,8 +168,7 @@ export class ServerTtsBackend {
     this.voiceId = voiceId;
     this.id = `server:${voiceId}`;
     this.label = label;
-    this.audio = new Audio();
-    this.audio.preload = 'auto';
+    this.background = true;   // an <audio> element survives a locked screen
     this._prefetched = new Set();
   }
 
@@ -100,7 +185,12 @@ export class ServerTtsBackend {
 
   speak(segment, { rate }) {
     return new Promise((resolve, reject) => {
-      const audio = this.audio;
+      const url = this.url(segment, rate);
+      // prefetch() parked this clip on the spare a step ago; playing it where
+      // it already sits costs no network round trip, which is what carries the
+      // hand-off across a screen that has just gone dark.
+      if (clips.spare.clip === url) clips.swap();
+      const audio = clips.current;
       const cleanup = () => {
         audio.onended = null;
         audio.onerror = null;
@@ -115,15 +205,33 @@ export class ServerTtsBackend {
         if (!audio.src || audio.src.endsWith('#cancelled')) resolve();
         else reject(new Error('伺服器語音載入失敗'));
       };
-      audio.src = this.url(segment, rate);
+      if (audio.clip !== url) {
+        audio.clip = url;
+        audio.src = url;
+      } else if (audio.currentTime) {
+        // Already played once — rewind, but only when it has loaded far enough
+        // to have a timeline to seek on.
+        try { audio.currentTime = 0; } catch { /* not seekable yet; starts at 0 anyway */ }
+      }
       audio.play().catch(reject);
     });
   }
 
-  // Warm the server's LRU (and the browser cache) one segment ahead.
+  // Warm the server's LRU and the HTTP cache one segment ahead, and park the
+  // clip on the spare element so the next hand-off needs nothing but play().
+  // iOS often declines to preload and waits for that play(), which is why the
+  // fetch stays: it is what actually guarantees the bytes are local by then.
   prefetch(segment, { rate }) {
     if (!segment) return;
     const url = this.url(segment, rate);
+    const spare = clips.spare;
+    if (spare.clip !== url) {
+      spare.onended = null;
+      spare.onerror = null;
+      spare.clip = url;
+      spare.src = url;
+      spare.load();
+    }
     if (this._prefetched.has(url)) return;
     this._prefetched.add(url);
     if (this._prefetched.size > 40) this._prefetched.clear();
@@ -131,18 +239,23 @@ export class ServerTtsBackend {
   }
 
   cancel() {
-    this.audio.pause();
-    this.audio.removeAttribute('src');
-    this.audio.load();
+    for (const audio of clips.all) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.clip = null;
+      audio.load();
+    }
   }
 
   pause() {
-    this.audio.pause();
+    clips.current.pause();
     return true;
   }
 
   resume() {
-    this.audio.play().catch(() => {});
+    clips.current.play().catch(() => {});
   }
 
   dispose() {
@@ -249,9 +362,13 @@ export class Player {
     while (generation === this._generation && this.index < this.segments.length) {
       const segment = this.segments[this.index];
       this.onSegment(this.index, segment);
+      // Claim this segment's clip before asking for the next one: the backend
+      // parks the lookahead on whichever element is idle, so prefetching first
+      // would overwrite the very clip we are about to play.
+      const spoken = this.backend.speak(segment, { rate: this.rate });
       this.backend.prefetch(this.segments[this.index + 1], { rate: this.rate });
       try {
-        await this.backend.speak(segment, { rate: this.rate });
+        await spoken;
       } catch (error) {
         if (generation !== this._generation) return;
         this._setStatus('idle');
@@ -270,7 +387,12 @@ export class Player {
   }
 
   async _gap(ms, generation) {
-    await new Promise((resolve) => setTimeout(resolve, ms / this.rate));
+    // With the page hidden the pause between sentences buys nothing — nobody is
+    // reading along — and it costs everything: a locked iPhone suspends the page
+    // within moments of the audio falling silent, and this timer is precisely
+    // the one that never comes back. Hand straight on to the next clip instead.
+    const delay = isHidden() ? 0 : ms / this.rate;
+    await new Promise((resolve) => setTimeout(resolve, delay));
     // Paused during the gap: hold here until resume() releases us.
     while (this.status === 'paused' && generation === this._generation) {
       await new Promise((resolve) => {
