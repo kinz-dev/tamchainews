@@ -127,6 +127,45 @@ export function resumePoint(checkpoint, record, id, now = Date.now()) {
   return 0;
 }
 
+/**
+ * What sort of thing an id names.
+ *
+ * It matters for chaining: a topic's clip is its channels read end to end, so
+ * following a channel with the topic that contains it would say the same words
+ * twice. Chaining therefore stays at the granularity it started at.
+ */
+export function kindOf(id = '') {
+  const text = String(id);
+  if (text.startsWith('daily:')) return 'daily';
+  if (text.startsWith('task:')) return 'task';
+  // The infix markers are checked first: a channel called "highlights" ends the
+  // same way a digest's highlights id does.
+  if (text.includes(':channel:')) return 'channel';
+  if (text.includes(':topic:')) return 'topic';
+  if (text.endsWith(':highlights')) return 'highlights';
+  return '';
+}
+
+/**
+ * The next thing to play after `currentId`: the following clip of the same kind
+ * that has not been heard yet, or null at the end of the run.
+ *
+ * `playables` is in the order the page renders them, so "next" means next down
+ * the page.
+ */
+export function nextPlayable(playables, currentId, records = new Map()) {
+  const at = playables.findIndex((item) => item.id === currentId);
+  if (at < 0) return null;
+  const kind = kindOf(currentId);
+  for (let i = at + 1; i < playables.length; i += 1) {
+    const item = playables[i];
+    if (kindOf(item.id) !== kind) continue;
+    if (stateOf(records.get(item.id)) === 'listened') continue;
+    return item;
+  }
+  return null;
+}
+
 // ------------------------------------------------------------------ storage
 
 function openDb() {

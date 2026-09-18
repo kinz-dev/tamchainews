@@ -17,6 +17,7 @@ import {
 } from './feed.js';
 import {
   ListenStore, idFor, stateOf, percentOf, tally, isResumable, resumePoint, parseDailyId,
+  nextPlayable,
 } from './listened.js';
 
 const $ = (id) => document.getElementById(id);
@@ -27,6 +28,7 @@ const els = {
   topicList: $('topic-list'), channelList: $('channel-list'),
   channelFilter: $('channel-filter'), channelCount: $('channel-count'),
   listenTally: $('listen-tally'), hideListened: $('hide-listened'),
+  autoplayNext: $('autoplay-next'),
   clearListened: $('clear-listened'), listenNote: $('listen-note'),
   crumbs: $('crumbs'), statusStrip: $('status-strip'), view: $('view'),
   pager: $('pager'), pagePrev: $('page-prev'), pageNext: $('page-next'), pageLabel: $('page-label'),
@@ -52,6 +54,7 @@ const state = {
   segments: [],
   listens: null,        // ListenStore
   onScreen: [],         // ids rendered by the current view, for the tally
+  playables: [],        // the same, in page order and carrying their text: the play queue
   resumed: false,       // restored from a checkpoint and not yet played
   touched: false,       // has the user actually driven the player this session?
 };
@@ -88,7 +91,7 @@ const player = new Player({
       state.listens.set(state.activeId, { done: true, title: els.nowTitle.textContent });
       refreshListenMarks();
     }
-    if (state.route.view === 'daily' && settings.autoplayNext) playAdjacentDay();
+    if (settings.autoplayNext) playNextUnheard();
   },
   onError: (error) => showBanner(`播放失敗：${error.message}`, true),
 });
@@ -166,6 +169,11 @@ function speakButton(text, { title, subtitle, id = '' } = {}) {
   const button = el('button', 'speak', '▶ 朗讀');
   button.type = 'button';
   button.setAttribute('aria-pressed', 'false');
+  if (id) {
+    button.dataset.speakId = id;
+    // Rendered in page order, so this doubles as the running order.
+    state.playables.push({ id, text, title, subtitle });
+  }
   button.addEventListener('click', () => {
     if (state.activeSource === button && player.status === 'playing') return player.pause();
     if (state.activeSource === button && player.status === 'paused') return player.resume();
@@ -254,6 +262,33 @@ function renderListenTally() {
     ? `已聽 ${counts.listened}/${counts.total}`
     : '';
   els.listenTally.hidden = !counts.total;
+}
+
+/**
+ * Roll on to the next clip that has not been heard, and keep playing.
+ *
+ * Only clips of the same kind are candidates — a topic's clip is its channels
+ * read end to end, so following a channel with its own topic would repeat the
+ * words — and the daily view chains days, which it does through selectDay
+ * because it owns the reader.
+ */
+function playNextUnheard() {
+  if (state.route.view === 'daily') return playAdjacentDay();
+
+  const next = nextPlayable(state.playables, state.activeId, state.listens.records);
+  if (!next) {
+    showBanner('呢版嘅未聽內容已經播完。', false, { seconds: 5 });
+    return;
+  }
+
+  const button = document.querySelector(`.speak[data-speak-id="${CSS.escape(next.id)}"]`);
+  speakText(next.text, {
+    title: next.title,
+    subtitle: next.subtitle,
+    button,
+    id: next.id,
+  });
+  button?.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 /** The user just drove the player: it is live now, not a restored position. */
@@ -617,18 +652,6 @@ function renderDailyView() {
   body.id = 'reader-body';
   els.view.appendChild(body);
 
-  const auto = el('label', 'autoplay');
-  const box = document.createElement('input');
-  box.type = 'checkbox';
-  box.checked = settings.autoplayNext;
-  box.addEventListener('change', () => {
-    settings.autoplayNext = box.checked;
-    localStorage.setItem('tamchai.autoplayNext', box.checked ? '1' : '0');
-  });
-  auto.appendChild(box);
-  auto.appendChild(document.createTextNode(' 連續播放下一日'));
-  els.view.appendChild(auto);
-
   // Reopen on the day the checkpoint was in, if it is still in the list.
   const saved = state.listens.playback;
   const savedDay = isResumable(saved) ? parseDailyId(saved.id) : '';
@@ -700,8 +723,11 @@ function selectDay(dayId, { autoplay = false, resume = false } = {}) {
 function playAdjacentDay() {
   const days = state.daily?.days || [];
   const at = days.findIndex((d) => d.day === state.currentDay?.day);
-  const following = days[at + 1];
+  const following = days
+    .slice(at + 1)
+    .find((day) => state.listens.stateOf(idFor.daily(day.day)) !== 'listened');
   if (following) selectDay(following.day, { autoplay: true });
+  else showBanner('未聽嘅每日總覽已經播完。', false, { seconds: 5 });
 }
 
 // ----------------------------------------------------------------- chrome
@@ -980,6 +1006,7 @@ async function fetchJson(url) {
 async function load({ force = false } = {}) {
   const { view } = state.route;
   state.onScreen = [];
+  state.playables = [];
   els.view.replaceChildren(el('p', 'placeholder', '載入中…'));
   try {
     if (view === 'daily') {
@@ -1117,6 +1144,11 @@ els.channelFilter.addEventListener('input', () => {
   renderChannelList(state.feed?.channels || [], els.channelFilter.value);
 });
 
+els.autoplayNext.addEventListener('change', () => {
+  settings.autoplayNext = els.autoplayNext.checked;
+  localStorage.setItem('tamchai.autoplayNext', settings.autoplayNext ? '1' : '0');
+});
+
 els.hideListened.addEventListener('change', () => {
   settings.hideListened = els.hideListened.checked;
   localStorage.setItem('tamchai.hideListened', settings.hideListened ? '1' : '0');
@@ -1188,6 +1220,7 @@ document.addEventListener('keydown', (event) => {
 (async function start() {
   state.listens = await ListenStore.open();
   els.hideListened.checked = settings.hideListened;
+  els.autoplayNext.checked = settings.autoplayNext;
   if (!state.listens.persistent) {
     els.listenNote.textContent = '此瀏覽器唔俾存資料，收聽紀錄淨係保留到今次。';
     els.listenNote.hidden = false;

@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   idFor, makeRecord, stateOf, ratioOf, percentOf, advance, tally, DONE_RATIO,
   makeCheckpoint, isResumable, RESUME_MAX_AGE_MS, resumePoint, parseDailyId,
+  kindOf, nextPlayable,
 } from '../web/listened.js';
 
 test('ids are stable and distinguish the thing being listened to', () => {
@@ -126,4 +127,53 @@ test('resumePoint starts a finished item over, and copes with nothing stored', (
 test('resumePoint ignores a checkpoint that has gone stale', () => {
   const stale = { id: 'x', text: '一。', segment: 12, total: 69, at: Date.now() - RESUME_MAX_AGE_MS - 1 };
   assert.equal(resumePoint(stale, undefined, 'x'), 0);
+});
+
+test('kindOf tells the granularities apart', () => {
+  assert.equal(kindOf('digest:75:highlights'), 'highlights');
+  assert.equal(kindOf('digest:75:topic:AI'), 'topic');
+  assert.equal(kindOf('digest:75:channel:r/technology'), 'channel');
+  assert.equal(kindOf('task:abc:123'), 'task');
+  assert.equal(kindOf('daily:2026-09-16'), 'daily');
+  assert.equal(kindOf('something-else'), '');
+  // A channel literally named "highlights" must not be mistaken for the section.
+  assert.equal(kindOf('digest:75:channel:highlights'), 'channel');
+  assert.equal(kindOf('digest:75:topic:highlights'), 'topic');
+});
+
+test('nextPlayable skips what has been heard', () => {
+  const playables = [
+    { id: 'digest:75:channel:a' },
+    { id: 'digest:75:channel:b' },
+    { id: 'digest:75:channel:c' },
+  ];
+  const records = new Map([['digest:75:channel:b', makeRecord({ id: 'digest:75:channel:b', done: true })]]);
+  assert.equal(nextPlayable(playables, 'digest:75:channel:a', records).id, 'digest:75:channel:c');
+});
+
+test('nextPlayable stays at the granularity it started at', () => {
+  // A topic clip is its channels read end to end; chaining across the two
+  // would repeat the same words.
+  const playables = [
+    { id: 'digest:75:topic:AI' },
+    { id: 'digest:75:channel:a' },
+    { id: 'digest:75:channel:b' },
+    { id: 'digest:75:topic:UK' },
+  ];
+  assert.equal(nextPlayable(playables, 'digest:75:topic:AI', new Map()).id, 'digest:75:topic:UK');
+  assert.equal(nextPlayable(playables, 'digest:75:channel:a', new Map()).id, 'digest:75:channel:b');
+});
+
+test('nextPlayable returns null at the end of the run', () => {
+  const playables = [{ id: 'digest:75:channel:a' }, { id: 'digest:75:channel:b' }];
+  const allHeard = new Map(playables.map((p) => [p.id, makeRecord({ id: p.id, done: true })]));
+  assert.equal(nextPlayable(playables, 'digest:75:channel:a', allHeard), null);
+  assert.equal(nextPlayable(playables, 'digest:75:channel:b', new Map()), null);
+  assert.equal(nextPlayable(playables, 'not-on-this-page', new Map()), null);
+});
+
+test('nextPlayable treats part-heard as still to play', () => {
+  const playables = [{ id: 'digest:75:channel:a' }, { id: 'digest:75:channel:b' }];
+  const partial = new Map([['digest:75:channel:b', makeRecord({ id: 'digest:75:channel:b', segment: 3, total: 10 })]]);
+  assert.equal(nextPlayable(playables, 'digest:75:channel:a', partial).id, 'digest:75:channel:b');
 });
