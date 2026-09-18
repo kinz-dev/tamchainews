@@ -1,0 +1,15 @@
+.git
+.venv
+data
+node_modules
+__pycache__
+*.pyc
+docs
+tests
+tools
+.gitignore
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+tamchainews.service

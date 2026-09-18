@@ -1,0 +1,22 @@
+services:
+  tamchainews:
+    build: .
+    image: tamchainews:latest
+    container_name: tamchainews
+    restart: unless-stopped
+    ports:
+      # Loopback only: put tailscale serve/funnel in front rather than exposing
+      # the port to the LAN. Drop the 127.0.0.1 if you want it on the network.
+      - "127.0.0.1:8082:8082"
+    # environment:
+    #   # Overrides config.json's base_url without rebuilding the image. Left
+    #   # commented so config.json stays the single source of truth: setting it
+    #   # here as well would silently win over any later edit to that file.
+    #   TAMCHAI_BASE_URL: "http://elsewhere:8081"
+    volumes:
+      # The day archive, which is what gives the reader a history past the
+      # three days upstream keeps.
+      - tamchai-data:/app/data
+
+volumes:
+  tamchai-data:
