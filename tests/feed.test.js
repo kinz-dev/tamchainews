@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   shapeDigest, groupByTopic, splitRefs, feedHealth, topicCounts,
   hostOf, relativeTime, parseRoute, buildRoute, routeToParams, healthSummary,
+  recentlyAdded, NEW_WINDOW_MS,
 } from '../web/feed.js';
 
 const DIGEST = {
@@ -177,4 +178,36 @@ test('a chosen date replaces the range, because upstream lets date win', () => {
   assert.equal(routeToParams({ date: '2026-09-16' }).toString(), 'date=2026-09-16');
   // Sending both would silently drop the range; only the date goes.
   assert.equal(routeToParams({ last: '5d', date: '2026-09-16' }).toString(), 'date=2026-09-16');
+});
+
+// ------------------------------------------------------------ what's new
+
+test('a digest counts as new by when it landed, not by how old its articles are', () => {
+  const now = Date.parse('2026-09-18T12:00:00Z');
+  const hoursAgo = (h) => Math.round(now / 1000 - h * 3600);
+  const digests = [
+    // Minutes old, but summarising articles from five days back — which is
+    // what upstream routinely does, and must not make it look stale.
+    { check_id: 1, checked_at: hoursAgo(0.5),
+      sections: [{ items: [{ created_utc: hoursAgo(120) }] }] },
+    { check_id: 2, checked_at: hoursAgo(3.9) },
+    { check_id: 3, checked_at: hoursAgo(4.1) },
+    { check_id: 4, checked_at: 0 },                    // no timestamp: not new
+  ];
+  const fresh = recentlyAdded(digests, { now }).map((d) => d.check_id);
+  assert.deepEqual(fresh, [1, 2]);
+});
+
+test('the window is four hours and can be narrowed', () => {
+  assert.equal(NEW_WINDOW_MS, 4 * 3600 * 1000);
+  const now = Date.parse('2026-09-18T12:00:00Z');
+  const digests = [{ check_id: 1, checked_at: Math.round(now / 1000 - 3600) }];
+  assert.equal(recentlyAdded(digests, { now }).length, 1);
+  assert.equal(recentlyAdded(digests, { now, windowMs: 30 * 60 * 1000 }).length, 0);
+});
+
+test('a digest stamped in the future is still new, not excluded', () => {
+  const now = Date.parse('2026-09-18T12:00:00Z');
+  const ahead = [{ check_id: 1, checked_at: Math.round(now / 1000 + 600) }];
+  assert.equal(recentlyAdded(ahead, { now }).length, 1);
 });

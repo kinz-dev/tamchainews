@@ -114,6 +114,26 @@ export function topicCounts(topics = [], channelTopics = {}) {
   return topics.map((topic) => ({ topic, channels: counts.get(topic) || 0 }));
 }
 
+/** How long a digest counts as newly arrived. */
+export const NEW_WINDOW_MS = 4 * 3600 * 1000;
+
+/**
+ * The digests upstream added within the window.
+ *
+ * Judged on `checked_at`, which is when the digest landed. The articles inside
+ * carry their own `created_utc` and are routinely days older — upstream
+ * summarises a running window rather than only what broke since the last check
+ * — so going by those would call a digest minutes old stale. It is also the
+ * only reading that composes with what has been heard, which is recorded per
+ * digest block and not per article.
+ */
+export function recentlyAdded(digests = [], { now = Date.now(), windowMs = NEW_WINDOW_MS } = {}) {
+  return digests.filter((digest) => {
+    const at = Number(digest.checked_at) || 0;
+    return at > 0 && now - at * 1000 <= windowMs;
+  });
+}
+
 const HOST_LABEL = /^www\./;
 
 /** "news.ycombinator.com" from a URL, for the source line under a headline. */

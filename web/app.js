@@ -11,13 +11,13 @@ import {
   loadVoices, rankVoices, installVoiceHint, speechStopsInBackground, clips,
 } from './player.js';
 import {
-  shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts,
+  shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts, recentlyAdded,
   hostOf, relativeTime, clockTime, formatClock,
   parseRoute, buildRoute, routeToParams, RANGES,
 } from './feed.js';
 import {
   ListenStore, idFor, stateOf, percentOf, tally, isResumable, resumePoint, parseDailyId,
-  nextPlayable, kindOf, containedBy, allContainedHeard,
+  nextPlayable, kindOf, containedBy, allContainedHeard, digestListenIds, anyUnheard,
 } from './listened.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,6 +31,7 @@ const els = {
   listenTally: $('listen-tally'), hideListened: $('hide-listened'),
   autoplayNext: $('autoplay-next'),
   clearListened: $('clear-listened'), listenNote: $('listen-note'),
+  topicNew: $('topic-new'),
   crumbs: $('crumbs'), statusStrip: $('status-strip'), view: $('view'),
   pager: $('pager'), pagePrev: $('page-prev'), pageNext: $('page-next'), pageLabel: $('page-label'),
   playerbar: $('playerbar'), nowTitle: $('now-title'), nowSub: $('now-sub'),
@@ -41,6 +42,7 @@ const els = {
 
 const state = {
   route: parseRoute(location.hash),
+  recentIds: [],        // listen keys of everything added in the last 4 hours
   feed: null,           // last /api/feed payload
   daily: null,          // last /api/daily payload
   config: null,
@@ -296,6 +298,7 @@ function refreshListenMarks() {
   }
   applyListenFilter();
   renderListenTally();
+  refreshNewBadge();
 }
 
 /** 只顯示未聽: hide the channel blocks whose summary has been heard. */
@@ -314,6 +317,46 @@ function applyListenFilter() {
     const emptied = groups.length > 0 && groups.every((g) => g.hidden);
     digest.hidden = hide && emptied && digest.classList.contains('is-listened');
   }
+}
+
+// ------------------------------------------------------------- what's new
+
+// The 新 badge answers one question: has anything arrived in the last four
+// hours that you have not heard yet?
+//
+// Deliberately not measured against what is on screen. /api/feed narrows to
+// the current topic, channel, date and page, and an answer that changed
+// because you happened to be reading one topic would be worthless — so it is
+// measured against the unfiltered newest page, which is where the last four
+// hours live whatever the rail is filtered to.
+const RECENT_TTL_MS = 60_000;
+let recentFetchedAt = 0;
+
+function isUnfiltered({ topic, channel, date, last, page }) {
+  return !topic && !channel && !date && !last && page === 1;
+}
+
+async function trackRecent({ force = false } = {}) {
+  let digests = null;
+  if (isUnfiltered(state.route) && state.feed?.digests) {
+    digests = state.feed.digests;                      // load() just fetched exactly this
+  } else if (force || Date.now() - recentFetchedAt > RECENT_TTL_MS) {
+    // Stale beats wrong: a failed fetch leaves the previous answer standing
+    // rather than clearing a badge that may well still be earned.
+    try { digests = (await fetchJson('/api/feed')).digests || []; } catch { digests = null; }
+  }
+  if (digests) {
+    recentFetchedAt = Date.now();
+    state.recentIds = recentlyAdded(digests)
+      .flatMap((digest) => digestListenIds(shapeDigest(digest)));
+  }
+  refreshNewBadge();
+}
+
+/** Repaint from what is already known — no network, so it can run per segment. */
+function refreshNewBadge() {
+  if (!els.topicNew) return;
+  els.topicNew.hidden = !anyUnheard(state.recentIds, state.listens?.records);
 }
 
 function renderListenTally() {
@@ -1281,6 +1324,7 @@ async function load({ force = false } = {}) {
   else await renderDigestsView();
 
   refreshListenMarks();
+  await trackRecent({ force });
   scheduleUpstreamPoll();
 }
 
