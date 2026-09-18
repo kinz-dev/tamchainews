@@ -157,33 +157,57 @@ export function formatClock(totalSeconds) {
  * The page's own URL state: which view, which filter, which page.
  * Kept in the hash so a filtered view is linkable and the back button works.
  */
+/** How far back to ask for. '' is upstream's own default of one day. */
+export const RANGES = [
+  { value: '', label: '今日' },
+  { value: '3d', label: '3 天' },
+  { value: '5d', label: '5 天' },
+];
+
+const RANGE_VALUES = new Set(RANGES.map((r) => r.value));
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
 export function parseRoute(hash = '') {
   const raw = String(hash).replace(/^#\/?/, '');
   const [view = 'digests', queryString = ''] = raw.split('?');
   const query = new URLSearchParams(queryString);
   const known = ['digests', 'daily', 'tasks', 'sources'];
+  const last = query.get('last') || '';
+  const date = query.get('date') || '';
   return {
     view: known.includes(view) ? view : 'digests',
     topic: query.get('topic') || '',
     channel: query.get('channel') || '',
     page: Math.max(1, Number(query.get('page')) || 1),
+    last: RANGE_VALUES.has(last) ? last : '',
+    date: ISO_DATE.test(date) ? date : '',
   };
 }
 
-export function buildRoute({ view = 'digests', topic = '', channel = '', page = 1 } = {}) {
+export function buildRoute({ view = 'digests', topic = '', channel = '', page = 1,
+                             last = '', date = '' } = {}) {
   const query = new URLSearchParams();
   if (topic) query.set('topic', topic);
   if (channel) query.set('channel', channel);
   if (page > 1) query.set('page', String(page));
+  if (last) query.set('last', last);
+  if (date) query.set('date', date);
   const suffix = query.toString();
   return `#/${view}${suffix ? `?${suffix}` : ''}`;
 }
 
-/** Route → the params /api/feed forwards upstream. */
-export function routeToParams({ topic, channel, page } = {}) {
+/**
+ * Route → the params /api/feed forwards upstream.
+ *
+ * `date` names one day and upstream lets it win over `last`, so sending both
+ * would quietly ignore the range; only one goes.
+ */
+export function routeToParams({ topic, channel, page, last, date } = {}) {
   const params = new URLSearchParams();
   if (topic) params.set('topics', topic);
   if (channel) params.set('channel', channel);
   if (page && page > 1) params.set('page', String(page));
+  if (date) params.set('date', date);
+  else if (last) params.set('last', last);
   return params;
 }
