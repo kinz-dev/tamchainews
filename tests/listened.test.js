@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   idFor, makeRecord, stateOf, ratioOf, percentOf, advance, tally, DONE_RATIO,
   makeCheckpoint, isResumable, RESUME_MAX_AGE_MS, resumePoint, parseDailyId,
-  kindOf, nextPlayable,
+  kindOf, nextPlayable, isLeaf, containedBy, allContainedHeard,
 } from '../web/listened.js';
 
 test('ids are stable and distinguish the thing being listened to', () => {
@@ -151,20 +151,49 @@ test('nextPlayable skips what has been heard', () => {
   assert.equal(nextPlayable(playables, 'digest:75:channel:a', records).id, 'digest:75:channel:c');
 });
 
-test('nextPlayable stays at the granularity it started at', () => {
-  // A topic clip is its channels read end to end; chaining across the two
-  // would repeat the same words.
+test('nextPlayable crosses kinds, so a run does not stop at a group boundary', () => {
   const playables = [
-    { id: 'digest:75:topic:AI' },
-    { id: 'digest:75:channel:a' },
     { id: 'digest:75:channel:b' },
-    { id: 'digest:75:topic:UK' },
+    { id: 'digest:74:highlights' },
+    { id: 'digest:74:channel:a' },
+    { id: 'task:t:1' },
   ];
-  assert.equal(nextPlayable(playables, 'digest:75:topic:AI', new Map()).id, 'digest:75:topic:UK');
-  assert.equal(nextPlayable(playables, 'digest:75:channel:a', new Map()).id, 'digest:75:channel:b');
+  // Last channel of one digest -> the next digest's highlights, not a dead end.
+  assert.equal(nextPlayable(playables, 'digest:75:channel:b', new Map()).id, 'digest:74:highlights');
+  assert.equal(nextPlayable(playables, 'digest:74:channel:a', new Map()).id, 'task:t:1');
 });
 
-test('nextPlayable returns null at the end of the run', () => {
+test('nextPlayable never chains into a topic clip', () => {
+  // A topic clip is its channels read end to end; landing on it would repeat
+  // what the channels just said.
+  const playables = [
+    { id: 'digest:75:channel:a' },
+    { id: 'digest:75:topic:UK' },
+    { id: 'digest:75:channel:b', parentId: 'digest:75:topic:UK' },
+  ];
+  assert.equal(nextPlayable(playables, 'digest:75:channel:a', new Map()).id, 'digest:75:channel:b');
+  assert.equal(isLeaf('digest:75:topic:UK'), false);
+  assert.equal(isLeaf('digest:75:channel:b'), true);
+  assert.equal(isLeaf('digest:75:highlights'), true);
+  assert.equal(isLeaf('task:t:1'), true);
+  assert.equal(isLeaf('daily:2026-09-16'), true);
+});
+
+test('a topic counts as heard once all of its channels are', () => {
+  const playables = [
+    { id: 'digest:75:channel:a', parentId: 'digest:75:topic:UK' },
+    { id: 'digest:75:channel:b', parentId: 'digest:75:topic:UK' },
+  ];
+  const records = new Map([['digest:75:channel:a', makeRecord({ id: 'digest:75:channel:a', done: true })]]);
+  assert.equal(containedBy(playables, 'digest:75:topic:UK').length, 2);
+  assert.equal(allContainedHeard(playables, 'digest:75:topic:UK', records), false);
+  records.set('digest:75:channel:b', makeRecord({ id: 'digest:75:channel:b', done: true }));
+  assert.equal(allContainedHeard(playables, 'digest:75:topic:UK', records), true);
+  // An empty topic is not "all heard" — there was nothing to hear.
+  assert.equal(allContainedHeard(playables, 'digest:75:topic:NONE', records), false);
+});
+
+test('nextPlayable returns null only when nothing unheard is left', () => {
   const playables = [{ id: 'digest:75:channel:a' }, { id: 'digest:75:channel:b' }];
   const allHeard = new Map(playables.map((p) => [p.id, makeRecord({ id: p.id, done: true })]));
   assert.equal(nextPlayable(playables, 'digest:75:channel:a', allHeard), null);

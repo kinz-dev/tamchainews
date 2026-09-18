@@ -114,3 +114,14 @@ test('the estimate scales the gaps too, the way the player does', () => {
 test('empty input yields nothing to play', () => {
   assert.deepEqual(prepare('   \n\n  ').segments, []);
 });
+
+test('citations are shown but not spoken, so screen and voice stay in step', () => {
+  const { segments } = prepare('眾議院通過法案 [1]，加州簽署新法 [23]。');
+  const [only] = segments;
+  // What the page prints keeps the markers, which are links to the articles...
+  assert.match(only.text, /\[1\]/);
+  assert.match(only.text, /\[23\]/);
+  // ...while the voice never reads them out.
+  assert.doesNotMatch(only.speak, /\[\d+\]/);
+  assert.equal(only.speak, '眾議院通過法案，加州簽署新法。');
+});

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  shapeDigest, groupByTopic, splitRefs, stripRefs, feedHealth, topicCounts,
+  shapeDigest, groupByTopic, splitRefs, feedHealth, topicCounts,
   hostOf, relativeTime, parseRoute, buildRoute, routeToParams, healthSummary,
 } from '../web/feed.js';
 
@@ -53,11 +53,6 @@ test('splitRefs turns citations into ref parts and leaves the prose alone', () =
 test('splitRefs ignores brackets with no matching item', () => {
   const parts = splitRefs('見 [9] 注', [{ ref: 1, url: 'https://a' }]);
   assert.deepEqual(parts, [{ type: 'text', value: '見 [9] 注' }]);
-});
-
-test('stripRefs removes citations without stranding a space before punctuation', () => {
-  assert.equal(stripRefs('眾議院通過法案 [1]，加州簽署 [2]。'), '眾議院通過法案，加州簽署。');
-  assert.equal(stripRefs('見 [1] 報導 [2] 詳情'), '見 報導 詳情');
 });
 
 test('feedHealth counts failures', () => {

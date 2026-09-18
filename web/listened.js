@@ -147,23 +147,48 @@ export function kindOf(id = '') {
 }
 
 /**
- * The next thing to play after `currentId`: the following clip of the same kind
- * that has not been heard yet, or null at the end of the run.
+ * The clips auto-play moves between.
+ *
+ * A topic's clip is its channels read end to end, so it is not a destination:
+ * chaining into it would repeat words its channels already said. It stays a
+ * button you can press deliberately, and playing it marks those channels heard.
+ * Everything else is content in its own right.
+ */
+const LEAF_KINDS = new Set(['highlights', 'channel', 'task', 'daily']);
+
+export function isLeaf(id) {
+  return LEAF_KINDS.has(kindOf(id));
+}
+
+/**
+ * The next thing to play after `currentId`: the next clip down the page that
+ * carries content of its own and has not been heard, whatever kind it is, or
+ * null when the page has nothing left.
  *
  * `playables` is in the order the page renders them, so "next" means next down
- * the page.
+ * the page — across topics, across digests, to the end.
  */
 export function nextPlayable(playables, currentId, records = new Map()) {
   const at = playables.findIndex((item) => item.id === currentId);
   if (at < 0) return null;
-  const kind = kindOf(currentId);
   for (let i = at + 1; i < playables.length; i += 1) {
     const item = playables[i];
-    if (kindOf(item.id) !== kind) continue;
+    if (!isLeaf(item.id)) continue;
     if (stateOf(records.get(item.id)) === 'listened') continue;
     return item;
   }
   return null;
+}
+
+/** The clips that make up `parentId` — a topic's channels. */
+export function containedBy(playables, parentId) {
+  return playables.filter((item) => item.parentId === parentId);
+}
+
+/** Has every clip inside `parentId` been heard? False when it contains nothing. */
+export function allContainedHeard(playables, parentId, records = new Map()) {
+  const inside = containedBy(playables, parentId);
+  return inside.length > 0 && inside.every((item) => stateOf(records.get(item.id)) === 'listened');
 }
 
 // ------------------------------------------------------------------ storage

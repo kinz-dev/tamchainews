@@ -64,18 +64,6 @@ export function splitRefs(text, items = []) {
   return parts;
 }
 
-/**
- * Citations read as noise out loud, so they come out before the text is spoken.
- * Removing "[1]" from "法案 [1]，加州" would otherwise strand a space in front of
- * the comma, which the voices pause on.
- */
-export function stripRefs(text) {
-  return text
-    .replace(REF_MARKER, '')
-    .replace(/\s+([，、。；：！？）」』])/g, '$1')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
 
 /**
  * Which feeds are unhealthy, for the status strip.

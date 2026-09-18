@@ -68,6 +68,14 @@ that rather than opening the port to the LAN.
 The day archive lives in the `tamchai-data` volume and survives the container
 being replaced; it is the only state the app has.
 
+`server.py` and `web/` are baked into the image, so **editing them needs a
+rebuild** — `docker compose up -d --build`. A plain `restart` keeps serving the
+old files, which looks exactly like a change that did not work.
+
+Memory is capped at 256 MB. The app sits at ~36 MiB idle and ~56 MiB after
+heavy browsing; the audio cache is bounded at 64 MB and the feed cache at 128
+entries, so the limit turns a runaway into a restart rather than host pressure.
+
 **A tailnet upstream works from inside the container** — Docker Desktop resolves
 MagicDNS names and routes to the tailnet through the host, so
 `sesame.tailb2a681.ts.net:8081` is reachable with no extra networking.
@@ -95,13 +103,25 @@ bar — and sidesteps Chrome's habit of truncating long utterances.
 
 | | |
 |---|---|
-| **摘要** | The digest stream, grouped topic → channel → summary, with each cited article behind a fold. Filter by topic or channel from the rail; paginate through the archive. |
+| **摘要** | The digest stream, grouped topic → channel → summary, with each cited article behind a fold. Filter by topic or channel from the rail; paginate through the archive. A filtered view also lists the scheduled reports that match — some topics (Transcript) have no digests at all and live entirely there. |
 | **每日總覽** | The Daily Summary reader: pick a day, follow along sentence by sentence, chain into the next day. |
 | **定時報告** | Scheduled prompt outputs (the finance digest and friends), rendered from Markdown. |
 | **訊源狀態** | Every feed's health, last fetch and last error. |
 
 Anything with text carries a **朗讀** button — highlights, a topic's channels, one
 channel's summary, a whole task report — and hands it to the same player.
+
+The sentence being read is lit up wherever it is on the page, and clicking any
+sentence jumps there. The prose is already rendered by then, with its citation
+links and bold, so rather than re-rendering it from the segments the page walks
+the text nodes and splits them at the sentence boundaries; a sentence that
+straddles a link becomes several spans sharing an index. A topic clip is the
+one exception — it is several channel blocks read end to end, so no single block
+on the page corresponds to it.
+
+Citations are dropped in the speech layer rather than before segmentation, which
+is what keeps the printed sentence and the spoken one two views of the same
+string: `[12]` stays a link on screen and is never read aloud.
 
 ### What you have already heard
 
@@ -125,11 +145,15 @@ one back to unheard. A heard block also mutes its text, without hiding it.
 With **播完自動播下一則** on, finishing a clip rolls straight into the next one
 down the page that you have not heard, and keeps going until the page runs out.
 
-Chaining stays at the granularity it started at — channel follows channel,
-topic follows topic. A topic's clip is its channels read end to end, so
-following a channel with the topic containing it would say the same words
-twice. Part-heard clips are still fair game; only finished ones are skipped.
-每日總覽 chains days the same way, skipping days already heard. The rail carries a running **已聽 n/m** for
+The run crosses topics and digests and keeps going to the end of the page.
+Part-heard clips are still fair game; only finished ones are skipped. 每日總覽
+chains days the same way, skipping days already heard.
+
+A topic's clip is its channels read end to end, so it is never a destination —
+landing on it would repeat what its channels just said. It stays a button you
+can press deliberately, and pressing it marks those channels heard; equally, a
+topic counts as heard once all of its channels are. Without that bookkeeping
+the two disagree and the run says the same thing twice. The rail carries a running **已聽 n/m** for
 what is on screen, a **只顯示未聽** filter that folds away channels you are done
 with, and **清除收聽紀錄** to wipe the lot.
 
@@ -200,7 +224,8 @@ through everything unheard.
 
 `?refresh=1` bypasses the cache on `/api/feed` and `/api/daily`. Each distinct
 query is cached separately, so browsing by topic never hammers the single-threaded
-upstream.
+upstream — as an LRU of 128 entries, because the cache key comes from parameters
+the caller chooses and `?page=1`, `?page=2`, `?page=99999` are three of them.
 
 ### Freshness
 
