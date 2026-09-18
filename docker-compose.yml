@@ -13,6 +13,12 @@ services:
     #   # commented so config.json stays the single source of truth: setting it
     #   # here as well would silently win over any later edit to that file.
     #   TAMCHAI_BASE_URL: "http://elsewhere:8081"
+    # Measured at ~36 MiB idle and ~56 MiB after heavy browsing; the audio cache
+    # is capped at 64 MB and the feed cache at 128 entries, so this leaves room
+    # for both and still turns a runaway into a restart rather than host pressure.
+    mem_limit: 256m
+    memswap_limit: 256m
+
     volumes:
       # The day archive, which is what gives the reader a history past the
       # three days upstream keeps.

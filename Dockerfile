@@ -1,5 +1,6 @@
-# syntax=docker/dockerfile:1
-
+# No `# syntax=` directive on purpose: it makes BuildKit fetch a frontend image
+# from Docker Hub before it will read this file, which turns a registry hiccup
+# into a build that hangs with no output. Nothing here needs it.
 FROM python:3.13-slim
 
 # edge-tts is the only dependency, and it is pure Python: no build toolchain,

@@ -63,6 +63,13 @@ TTS_VOICES = [
 TTS_CACHE_MAX_BYTES = 64 * 1024 * 1024
 TTS_MAX_CHARS = 400
 
+# The cache key is built from query parameters the caller chooses, so the set of
+# possible keys is unbounded: ?page=1, ?page=2, ?page=99999 are three entries.
+# The UI only ever asks for about a hundred distinct queries (topics, channels,
+# pages), so a cap well above that costs nothing in normal use and stops an
+# outside caller growing the process without limit.
+FEED_CACHE_MAX_ENTRIES = 128
+
 # Upstream query parameters the browser is allowed to pass through. Anything
 # else is dropped rather than forwarded, so /api/feed can't be used to probe
 # the upstream with arbitrary arguments.
@@ -142,11 +149,14 @@ class Upstream:
     page — and the upstream is single-threaded, so repeat views must not reach it.
     """
 
-    def __init__(self, config: dict, archive_dir: Path | None):
+    def __init__(self, config: dict, archive_dir: Path | None,
+                 max_entries: int = FEED_CACHE_MAX_ENTRIES):
         self._config = config
         self._archive_dir = archive_dir
+        self._max_entries = max_entries
         self._lock = threading.Lock()
-        self._entries: dict[str, dict] = {}       # key -> {payload, fetched_at, error}
+        # LRU, like the audio cache: least recently used falls off the front.
+        self._entries: OrderedDict[str, dict] = OrderedDict()
         self._inflight: dict[str, threading.Lock] = {}
 
     # -- raw queries ------------------------------------------------------
@@ -159,6 +169,7 @@ class Upstream:
         with self._lock:
             entry = self._entries.get(key)
             if entry and not force and time.time() - entry["fetched_at"] < ttl:
+                self._entries.move_to_end(key)
                 return self._wrap(entry, cached=True)
             gate = self._inflight.setdefault(key, threading.Lock())
 
@@ -166,6 +177,7 @@ class Upstream:
             with self._lock:                      # another thread may have just filled it
                 entry = self._entries.get(key)
                 if entry and not force and time.time() - entry["fetched_at"] < ttl:
+                    self._entries.move_to_end(key)
                     return self._wrap(entry, cached=True)
             try:
                 payload = self._get(params)
@@ -176,6 +188,7 @@ class Upstream:
                 previous = self._entries.get(key)
                 if payload is None and previous:
                     previous["error"] = error
+                    self._entries.move_to_end(key)
                     result = self._wrap(previous, cached=True)
                 else:
                     entry = {
@@ -184,6 +197,9 @@ class Upstream:
                         "error": error,
                     }
                     self._entries[key] = entry
+                    self._entries.move_to_end(key)
+                    while len(self._entries) > self._max_entries:
+                        self._entries.popitem(last=False)
                     result = self._wrap(entry, cached=False)
                 self._inflight.pop(key, None)
             return result
