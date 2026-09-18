@@ -89,7 +89,18 @@ Each block carries a marker pinned to its top-right corner:
 
 The marker is always there, so there is one place to look and one place to
 click: pressing it marks the block heard without listening, or puts a finished
-one back to unheard. A heard block also mutes its text, without hiding it. The rail carries a running **已聽 n/m** for
+one back to unheard. A heard block also mutes its text, without hiding it.
+
+### Playing on
+
+With **播完自動播下一則** on, finishing a clip rolls straight into the next one
+down the page that you have not heard, and keeps going until the page runs out.
+
+Chaining stays at the granularity it started at — channel follows channel,
+topic follows topic. A topic's clip is its channels read end to end, so
+following a channel with the topic containing it would say the same words
+twice. Part-heard clips are still fair game; only finished ones are skipped.
+每日總覽 chains days the same way, skipping days already heard. The rail carries a running **已聽 n/m** for
 what is on screen, a **只顯示未聽** filter that folds away channels you are done
 with, and **清除收聽紀錄** to wipe the lot.
 
@@ -145,7 +156,8 @@ banner explains where to install one on that platform.
 ### Controls
 
 `空白鍵` play/pause · `←` `→` previous/next sentence · `Esc` stop · click any sentence
-to jump there · click the progress bar to scrub · **連續播放下一日** chains the days.
+to jump there · click the progress bar to scrub · **播完自動播下一則** chains
+through everything unheard.
 
 ## API
 
