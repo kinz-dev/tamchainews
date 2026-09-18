@@ -11,13 +11,13 @@ import {
   loadVoices, rankVoices, installVoiceHint,
 } from './player.js';
 import {
-  shapeDigest, splitRefs, stripRefs, feedHealth, healthSummary, topicCounts,
+  shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts,
   hostOf, relativeTime, clockTime, formatClock,
   parseRoute, buildRoute, routeToParams,
 } from './feed.js';
 import {
   ListenStore, idFor, stateOf, percentOf, tally, isResumable, resumePoint, parseDailyId,
-  nextPlayable,
+  nextPlayable, kindOf, containedBy, allContainedHeard,
 } from './listened.js';
 
 const $ = (id) => document.getElementById(id);
@@ -53,6 +53,7 @@ const state = {
   currentDay: null,
   segments: [],
   listens: null,        // ListenStore
+  highlighted: null,    // {container, original} while a block carries sentence spans
   onScreen: [],         // ids rendered by the current view, for the tally
   playables: [],        // the same, in page order and carrying their text: the play queue
   resumed: false,       // restored from a checkpoint and not yet played
@@ -89,6 +90,7 @@ const player = new Player({
     els.progressLabel.textContent = '播放完畢';
     if (state.activeId) {
       state.listens.set(state.activeId, { done: true, title: els.nowTitle.textContent });
+      settleContainment(state.activeId);
       refreshListenMarks();
     }
     if (settings.autoplayNext) playNextUnheard();
@@ -100,6 +102,12 @@ const player = new Player({
 function speakText(text, { title = '', subtitle = '', button = null, id = '' } = {}) {
   const { segments } = prepare(text);
   if (!segments.length) return;
+
+  // A topic clip is several channel blocks read end to end, so no single block
+  // on the page matches it; everything else lights up as it is read.
+  const block = kindOf(id) === 'topic'
+    ? null
+    : button?.closest('.channel-block, .task, .highlights')?.querySelector('.clip-body');
 
   if (state.activeSource && state.activeSource !== button) {
     state.activeSource.setAttribute('aria-pressed', 'false');
@@ -117,6 +125,7 @@ function speakText(text, { title = '', subtitle = '', button = null, id = '' } =
   els.nowTitle.textContent = state.activeTitle;
   els.nowSub.textContent = subtitle;
 
+  beginHighlighting(block, segments);
   player.load(segments, chooseBackend());
   player.setRate(settings.rate);
   player.play(0);
@@ -165,14 +174,14 @@ function link(href, text, className) {
  * the block itself rather than sitting in this row — next to 朗讀 it read as a
  * second button instead of a status.
  */
-function speakButton(text, { title, subtitle, id = '' } = {}) {
+function speakButton(text, { title, subtitle, id = '', parentId = '' } = {}) {
   const button = el('button', 'speak', '▶ 朗讀');
   button.type = 'button';
   button.setAttribute('aria-pressed', 'false');
   if (id) {
     button.dataset.speakId = id;
     // Rendered in page order, so this doubles as the running order.
-    state.playables.push({ id, text, title, subtitle });
+    state.playables.push({ id, text, title, subtitle, parentId });
   }
   button.addEventListener('click', () => {
     if (state.activeSource === button && player.status === 'playing') return player.pause();
@@ -265,12 +274,35 @@ function renderListenTally() {
 }
 
 /**
+ * Keep a topic and its channels honest about each other.
+ *
+ * Hearing a topic read out is hearing every channel in it, and hearing every
+ * channel in a topic leaves nothing of the topic unheard. Without this the two
+ * disagree, and auto-play would read the same words twice.
+ */
+function settleContainment(id) {
+  const kind = kindOf(id);
+
+  if (kind === 'topic') {
+    for (const child of containedBy(state.playables, id)) {
+      state.listens.set(child.id, { done: true, title: child.title });
+    }
+    return;
+  }
+
+  const parentId = state.playables.find((item) => item.id === id)?.parentId;
+  if (parentId && allContainedHeard(state.playables, parentId, state.listens.records)) {
+    state.listens.set(parentId, { done: true });
+  }
+}
+
+/**
  * Roll on to the next clip that has not been heard, and keep playing.
  *
- * Only clips of the same kind are candidates — a topic's clip is its channels
- * read end to end, so following a channel with its own topic would repeat the
- * words — and the daily view chains days, which it does through selectDay
- * because it owns the reader.
+ * It runs to the end of the page, across topics and across digests. Topic clips
+ * are not destinations — they repeat their channels — but everything else is
+ * fair game. The daily view chains days through selectDay, which owns the
+ * reader.
  */
 function playNextUnheard() {
   if (state.route.view === 'daily') return playAdjacentDay();
@@ -339,6 +371,7 @@ function checkpoint(index = player.index) {
 function restorePlayback(checkpointed) {
   const { segments } = prepare(checkpointed.text);
   if (!segments.length) return;
+  endHighlighting();
 
   state.activeId = checkpointed.id;
   state.activeText = checkpointed.text;
@@ -410,7 +443,7 @@ function withInline(node, text) {
 
 /** Prose with its "[n]" citations turned into links to the cited item. */
 function renderSummary(text, items) {
-  const p = el('p', 'summary');
+  const p = el('p', 'summary clip-body');
   for (const part of splitRefs(text, items)) {
     if (part.type === 'text') p.appendChild(document.createTextNode(part.value));
     else p.appendChild(link(part.item.link || part.item.url, `[${part.value}]`, 'ref-link'));
@@ -470,7 +503,7 @@ function renderDigest(digest) {
       id: idFor.digestHighlights(shaped.id),
     }));
     box.appendChild(bar);
-    renderMarkdown(shaped.highlights, box);
+    box.appendChild(renderMarkdown(shaped.highlights, el('div', 'clip-body')));
     box.appendChild(listenMark(idFor.digestHighlights(shaped.id), '重點'));
     article.appendChild(box);
   }
@@ -483,7 +516,7 @@ function renderDigest(digest) {
     head2.appendChild(h3);
     head2.appendChild(el('span', 'n', `${group.channels.length} 個頻道 · ${group.posts} 篇`));
 
-    const spoken = group.channels.map((c) => `${c.channel}。${stripRefs(c.summary)}`).join('\n\n');
+    const spoken = group.channels.map((c) => `${c.channel}。${c.summary}`).join('\n\n');
     if (spoken.trim()) {
       head2.appendChild(speakButton(spoken, {
         title: group.topic,
@@ -501,10 +534,11 @@ function renderDigest(digest) {
       name.appendChild(channelLink(channel.channel));
       chead.appendChild(name);
       if (channel.summary) {
-        chead.appendChild(speakButton(stripRefs(channel.summary), {
+        chead.appendChild(speakButton(channel.summary, {
           title: channel.channel,
           subtitle: group.topic,
           id: idFor.digestChannel(shaped.id, channel.channel),
+          parentId: idFor.digestTopic(shaped.id, group.topic),
         }));
       }
       block.appendChild(chead);
@@ -535,16 +569,57 @@ function channelLink(channel) {
 async function renderDigestsView() {
   const payload = state.feed;
   const digests = payload?.digests || [];
+  // Some topics have no digests at all — their content is scheduled reports
+  // (Transcript is entirely that). Rendering only digests left those topics
+  // looking empty while upstream plainly had something to show.
+  const filtered = Boolean(state.route.topic || state.route.channel);
+  const tasks = filtered ? (payload?.tasks || []) : [];
+
   els.view.replaceChildren();
 
-  if (!digests.length) {
-    els.view.appendChild(el('p', 'placeholder', '未有摘要。'));
+  if (!digests.length && !tasks.length) {
+    els.view.appendChild(el('p', 'placeholder', '呢個篩選未有內容。'));
+    hidePager();
     return;
   }
+
   for (const digest of digests) els.view.appendChild(renderDigest(digest));
 
+  if (tasks.length) {
+    const heading = el('h3', 'stream-heading', `定時報告（${tasks.length}）`);
+    els.view.appendChild(heading);
+    for (const task of tasks) els.view.appendChild(renderTask(task));
+  }
+
   const page = payload.page || {};
-  renderPager(page.number || 1, page.pages || 1);
+  if (digests.length) renderPager(page.number || 1, page.pages || 1);
+  else hidePager();
+}
+
+/**
+ * One scheduled report. Shared by the 定時報告 view and the digest stream,
+ * because a topic's content can live in either place.
+ */
+function renderTask(task) {
+  const card = el('article', 'task');
+  const listenId = idFor.task(task.task_id || task.id, task.finished_at);
+  const title = task.prompt || '定時報告';
+  const when = relativeTime(task.finished_at || task.started_at);
+
+  const head = el('div', 'task-head');
+  head.appendChild(el('span', 'task-name', title));
+  head.appendChild(el('span', 'badge ' + (task.status === 'ok' ? 'ok' : 'bad'), task.status || '?'));
+  if (task.schedule) head.appendChild(el('span', 'task-sched', task.schedule));
+  head.appendChild(el('span', 'task-when', when));
+  if (task.output) {
+    head.appendChild(speakButton(task.output, { title, subtitle: when, id: listenId }));
+  }
+  card.appendChild(head);
+
+  if (task.output) card.appendChild(renderMarkdown(task.output, el('div', 'task-body clip-body')));
+  if (task.error) card.appendChild(el('p', 'task-error', task.error));
+  if (task.output) card.appendChild(listenMark(listenId, title));
+  return card;
 }
 
 function renderTasksView() {
@@ -554,30 +629,7 @@ function renderTasksView() {
     els.view.appendChild(el('p', 'placeholder', '未有定時報告。'));
     return;
   }
-  for (const task of tasks) {
-    const card = el('article', 'task');
-    const head = el('div', 'task-head');
-    head.appendChild(el('span', 'task-name', task.prompt || task.task_id || '任務'));
-    head.appendChild(el('span', 'badge ' + (task.status === 'ok' ? 'ok' : 'bad'), task.status || '?'));
-    if (task.schedule) head.appendChild(el('span', 'task-sched', task.schedule));
-    head.appendChild(el('span', 'task-when', relativeTime(task.finished_at || task.started_at)));
-    if (task.output) {
-      head.appendChild(speakButton(task.output, {
-        title: task.prompt || '定時報告',
-        subtitle: relativeTime(task.finished_at || task.started_at),
-        id: idFor.task(task.task_id || task.id, task.finished_at),
-      }));
-    }
-    card.appendChild(head);
-
-    if (task.output) card.appendChild(renderMarkdown(task.output, el('div', 'task-body')));
-    if (task.error) card.appendChild(el('p', 'task-error', task.error));
-    if (task.output) {
-      card.appendChild(listenMark(idFor.task(task.task_id || task.id, task.finished_at),
-                                  task.prompt || '定時報告'));
-    }
-    els.view.appendChild(card);
-  }
+  for (const task of tasks) els.view.appendChild(renderTask(task));
   hidePager();
 }
 
@@ -664,6 +716,7 @@ function renderDailyView() {
 
 /** Render one day's digest as clickable sentences, the way the reader always worked. */
 function selectDay(dayId, { autoplay = false, resume = false } = {}) {
+  endHighlighting();
   const day = (state.daily?.days || []).find((d) => d.day === dayId);
   if (!day) return;
   state.currentDay = day;
@@ -920,13 +973,115 @@ function hideBanner() { els.banner.hidden = true; }
 
 // --------------------------------------------------------------- progress
 
-function markActiveSegment(index) {
-  for (const node of document.querySelectorAll('.seg.active')) node.classList.remove('active');
-  const node = document.querySelector(`.seg[data-index="${index}"]`);
-  if (node) {
-    node.classList.add('active');
-    node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+/**
+ * Wrap each spoken sentence of `container` in its own span, so the one being
+ * read can be highlighted.
+ *
+ * The prose is already rendered — with citation links, bold, headings — and all
+ * of that has to survive, so rather than re-rendering from the segments this
+ * walks the text nodes and splits them at the sentence boundaries. A sentence
+ * that straddles a link becomes several spans sharing an index; highlighting
+ * lights them all.
+ *
+ * Returns false when the text could not be aligned, in which case the block is
+ * left exactly as it was.
+ */
+function wrapSegments(container, segments) {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const chars = [];                       // every non-space character, and where it lives
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const value = node.nodeValue;
+    for (let i = 0; i < value.length; i += 1) {
+      if (!/\s/.test(value[i])) chars.push({ node, offset: i, c: value[i] });
+    }
   }
+  if (!chars.length) return false;
+
+  // Locate each sentence in that stream, scanning forward so repeated wording
+  // matches the occurrence that belongs to this sentence.
+  const found = [];
+  let cursor = 0;
+  for (const segment of segments) {
+    const needle = segment.text.replace(/\s+/g, '');
+    if (!needle) continue;
+    let start = -1;
+    for (let at = cursor; at + needle.length <= chars.length; at += 1) {
+      let ok = true;
+      for (let k = 0; k < needle.length; k += 1) {
+        if (chars[at + k].c !== needle[k]) { ok = false; break; }
+      }
+      if (ok) { start = at; break; }
+    }
+    if (start < 0) continue;
+    found.push({ index: segment.index, from: start, to: start + needle.length - 1 });
+    cursor = start + needle.length;
+  }
+  if (!found.length) return false;
+
+  // Split per text node, latest first so earlier offsets stay valid.
+  const pieces = [];
+  for (const { index, from, to } of found) {
+    let runNode = chars[from].node;
+    let runStart = chars[from].offset;
+    let runEnd = chars[from].offset;
+    for (let i = from + 1; i <= to; i += 1) {
+      if (chars[i].node === runNode) {
+        runEnd = chars[i].offset;
+      } else {
+        pieces.push({ index, node: runNode, start: runStart, end: runEnd });
+        runNode = chars[i].node;
+        runStart = chars[i].offset;
+        runEnd = chars[i].offset;
+      }
+    }
+    pieces.push({ index, node: runNode, start: runStart, end: runEnd });
+  }
+
+  for (const piece of pieces.reverse()) {
+    const node = piece.node;
+    if (!node.parentNode) continue;
+    const tail = node.splitText(piece.start);
+    tail.splitText(piece.end - piece.start + 1);
+    const span = el('span', 'seg');
+    span.dataset.index = String(piece.index);
+    tail.parentNode.insertBefore(span, tail);
+    span.appendChild(tail);
+  }
+  return true;
+}
+
+/**
+ * Put sentence spans on the block that is playing, remembering the untouched
+ * markup so it can be handed back when playback moves on.
+ */
+function beginHighlighting(container, segments) {
+  endHighlighting();
+  if (!container || !segments.length) return;
+  const original = [...container.childNodes].map((node) => node.cloneNode(true));
+  if (!wrapSegments(container, segments)) return;
+  state.highlighted = { container, original };
+  for (const span of container.querySelectorAll('.seg')) {
+    span.addEventListener('click', () => {
+      userDrives();
+      player.seek(Number(span.dataset.index));
+    });
+  }
+}
+
+function endHighlighting() {
+  const held = state.highlighted;
+  state.highlighted = null;
+  if (!held || !held.container.isConnected) return;
+  held.container.replaceChildren(...held.original.map((node) => node.cloneNode(true)));
+}
+
+/** Light the sentence being spoken, wherever on the page it is. */
+function markActiveSegment(index) {
+  const scope = state.highlighted?.container || document;
+  for (const node of document.querySelectorAll('.seg.active')) node.classList.remove('active');
+  const nodes = scope.querySelectorAll(`.seg[data-index="${index}"]`);
+  nodes.forEach((node) => node.classList.add('active'));
+  if (nodes.length) nodes[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 function clearActiveSegment() {

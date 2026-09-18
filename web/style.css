@@ -436,6 +436,13 @@ details.refs-box > summary:hover { color: var(--accent); }
 .badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
 .badge.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
 
+/* A divider when the digest stream also carries scheduled reports. */
+.stream-heading {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-faint); font-weight: 600;
+  margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+
 /* ---------------------------------------------------------------- sources */
 
 .source-table { width: 100%; border-collapse: collapse; font-size: 13px; }

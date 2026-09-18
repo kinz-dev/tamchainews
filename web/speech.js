@@ -11,6 +11,11 @@ const CLAUSE_END = /(?<=[，、；：])/;
 // Only the substitutions that measurably help zh-HK voices. Latin names are left
 // alone — the neural voices handle them better than any transliteration would.
 export const PRONUNCIATION = [
+  // "[12]" is a citation marker: on screen it is a link to the article, out
+  // loud it is noise. Dropping it here rather than before segmentation keeps
+  // `text` and `speak` two views of the same sentence, so the page can light
+  // up the sentence being read.
+  [/\s*\[\d{1,3}\]/g, ''],
   // The digests gloss acronyms as "聯邦儲備局（Fed）". The gloss is for readers;
   // spoken, it doubles every term up, so drop a parenthetical that is only Latin.
   [/(?<=[\u4e00-\u9fff》」』\uff09)])\s*[（(]\s*[A-Za-z][A-Za-z0-9.&'\- ]{0,19}\s*[）)]/g, ''],
