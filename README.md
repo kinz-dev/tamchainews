@@ -281,6 +281,8 @@ web/icon.svg          the app mark — a 譚仔 bowl broadcasting
 tools/make_icons.py   redraws icon.svg into favicon.ico and the PNG sizes
 tests/                node --test  ·  npm test
 docs/ARCHITECTURE.md  the design and the constraints behind it
+docs/IDEAS.md         everything on the table, from the obvious to the daft
+docs/ROADMAP.md       what is actually being built next, in order
 ```
 
 ### Icon
