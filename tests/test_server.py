@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from server import CharBudget, client_ip, is_trusted  # noqa: E402
+from server import PROXY_NETS, TRUSTED_NETS, CharBudget, client_ip, is_trusted  # noqa: E402
 
 
 class TestTrusted(unittest.TestCase):
@@ -34,6 +34,23 @@ class TestTrusted(unittest.TestCase):
         self.assertTrue(is_trusted("fd7a:115c:a1e0::1%utun3"))
 
 
+class TestProxyNetsAreNotTrustNets(unittest.TestCase):
+    """The two sets answer different questions, and swapping them is a hole."""
+
+    def test_the_bridge_gateway_forwards_but_is_not_exempt(self):
+        # Docker puts every request behind 172.x. Believing its header is right;
+        # handing it the tailnet's exemption would exempt the whole internet.
+        for addr in ("172.22.0.1", "172.17.0.1", "192.168.65.1", "10.0.2.2"):
+            self.assertTrue(client_ip(addr, "8.8.8.8") == "8.8.8.8", addr)
+            self.assertFalse(is_trusted(addr), addr)
+
+    def test_the_tailnet_is_exempt_but_is_not_a_proxy(self):
+        # Nothing of ours sits at a tailnet address, so a header from one is
+        # the caller's own writing.
+        self.assertTrue(is_trusted("100.64.0.1"))
+        self.assertEqual(client_ip("100.64.0.1", "8.8.8.8"), "100.64.0.1")
+
+
 class TestClientIp(unittest.TestCase):
     def test_plain_connection_is_its_own_peer(self):
         self.assertEqual(client_ip("8.8.8.8", None), "8.8.8.8")
@@ -44,11 +61,26 @@ class TestClientIp(unittest.TestCase):
         self.assertEqual(client_ip("127.0.0.1", "8.8.8.8"), "8.8.8.8")
         self.assertEqual(client_ip("127.0.0.1", "8.8.8.8, 10.0.0.1"), "8.8.8.8")
 
+    def test_serve_in_front_of_the_container_reaches_the_tailnet_caller(self):
+        # The deployment this actually runs in: tailscale serve sets the header,
+        # Docker replaces the peer with the bridge gateway. Before the proxy set
+        # was split out, the header was discarded and the whole tailnet was
+        # billed to 172.22.0.1 as one anonymous stranger.
+        who = client_ip("172.22.0.1", "100.101.102.103")
+        self.assertEqual(who, "100.101.102.103")
+        self.assertTrue(is_trusted(who))
+
     def test_forwarded_from_a_stranger_is_ignored(self):
         # Otherwise anyone could spend someone else's budget, or claim to be
         # on the tailnet and skip the token entirely.
         self.assertEqual(client_ip("8.8.8.8", "127.0.0.1"), "8.8.8.8")
         self.assertEqual(client_ip("8.8.8.8", "100.64.0.1"), "8.8.8.8")
+
+    def test_an_unproxied_container_caller_is_just_the_gateway(self):
+        # No header, so there is nothing better to say: everyone behind the
+        # bridge shares one budget until `tailscale serve` supplies one.
+        self.assertEqual(client_ip("172.22.0.1", None), "172.22.0.1")
+        self.assertFalse(is_trusted("172.22.0.1"))
 
     def test_empty_forwarded_falls_back_to_the_peer(self):
         self.assertEqual(client_ip("127.0.0.1", ""), "127.0.0.1")

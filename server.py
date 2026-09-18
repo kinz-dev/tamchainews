@@ -82,13 +82,30 @@ TTS_VOICES = [
 TTS_CACHE_MAX_BYTES = 64 * 1024 * 1024
 TTS_MAX_CHARS = 400
 
-# Networks that reach this server without crossing anything public: loopback,
-# and the ranges Tailscale hands out. A caller from here is the owner, so the
-# token and the budget are both skipped.
+# Two different questions, and conflating them is how this went wrong once
+# already.
+#
+# TRUSTED_NETS answers *may this caller skip the token and the budget* —
+# loopback and the ranges Tailscale hands out, which is to say the owner.
 TRUSTED_NETS = tuple(ipaddress.ip_network(n) for n in (
     "127.0.0.0/8", "::1/128",
     "100.64.0.0/10",          # tailnet IPv4 (CGNAT)
     "fd7a:115c:a1e0::/48",    # tailnet IPv6
+))
+
+# PROXY_NETS answers *may I believe this peer's X-Forwarded-For*, which is a
+# question about the hop, not the caller. In the container every request
+# arrives from the bridge gateway (172.x), so testing the peer against
+# TRUSTED_NETS threw away Tailscale's header and billed the whole tailnet to
+# one address.
+#
+# Everything here must be unreachable from outside the host. compose publishes
+# to 127.0.0.1 only, which is what makes the bridge ranges safe to list; a
+# container opened to the LAN would let a neighbour forge the header, and the
+# README says not to do that for this reason among others.
+PROXY_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "::1/128",
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # docker bridge / vpnkit
 ))
 
 # How many distinct clients the budget tracks. Past this the oldest is dropped
@@ -333,19 +350,27 @@ class Upstream:
 # ------------------------------------------------------------------- who is calling
 
 
-def client_ip(peer: str, forwarded: str | None) -> str:
+def in_nets(addr: str, nets) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr.strip().strip("[]").split("%")[0])
+    except ValueError:
+        return False
+    return any(ip in net for net in nets)
+
+
+def client_ip(peer: str, forwarded: str | None, proxies=PROXY_NETS) -> str:
     """The address to hold responsible.
 
-    `tailscale serve` and `funnel` proxy to loopback, so the socket says
-    127.0.0.1 for the whole public internet — which would make every outside
-    caller look like the owner. They also set X-Forwarded-For, so when the peer
-    is loopback that header is the better answer.
+    `tailscale serve` and `funnel` proxy to loopback, and Docker proxies to the
+    bridge gateway, so the socket says one local address for the whole public
+    internet. Both set X-Forwarded-For, so when the peer is a hop we put there
+    ourselves that header is the better answer.
 
-    It is only better *because* the peer is loopback. Taken from any other peer
-    it is a header the caller writes themselves, and trusting it would let
-    anyone spend someone else's budget.
+    It is only better *because* the peer is one of ours. Taken from anywhere
+    else it is a header the caller writes, and believing it would let a
+    stranger claim the tailnet and skip both controls.
     """
-    if forwarded and is_trusted(peer):
+    if forwarded and in_nets(peer, proxies):
         first = forwarded.split(",")[0].strip()
         if first:
             return first
@@ -354,11 +379,7 @@ def client_ip(peer: str, forwarded: str | None) -> str:
 
 def is_trusted(addr: str) -> bool:
     """True for loopback and the tailnet — no token, no budget."""
-    try:
-        ip = ipaddress.ip_address(addr.strip().strip("[]").split("%")[0])
-    except ValueError:
-        return False
-    return any(ip in net for net in TRUSTED_NETS)
+    return in_nets(addr, TRUSTED_NETS)
 
 
 class CharBudget:

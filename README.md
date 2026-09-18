@@ -237,10 +237,23 @@ serve`.
 hit sends nothing — which also means a stranger feeding it fresh text, every
 piece of which is a miss by construction, pays for all of it.
 
-`serve` and `funnel` proxy to loopback, so the socket claims 127.0.0.1 for the
-whole public internet. `X-Forwarded-For` is read **only when the peer is itself
-loopback** — taken from anyone else it is a header the caller writes, and
-trusting it would let a stranger claim the tailnet and skip both controls.
+Two separate questions, and conflating them is how this went wrong once
+already. *May this caller skip the controls* is loopback and the tailnet. *May I
+believe this peer's `X-Forwarded-For`* is a question about the hop — loopback and
+the Docker bridge ranges, because `serve`, `funnel` and Docker all replace the
+socket address with a local one and set the header instead. Taken from anywhere
+else the header is the caller's own writing, and believing it would let a
+stranger claim the tailnet.
+
+Everything on that second list has to be unreachable from outside the host.
+Compose publishes to `127.0.0.1` only, which is what makes the bridge ranges safe
+to list — **a container opened to the LAN would let a neighbour forge the
+header**, which is one more reason not to.
+
+In the container with nothing in front of it, there is no header and every
+caller is the bridge gateway, so they share one budget and none of them are
+exempt. Putting `tailscale serve` in front is what restores per-caller
+accounting, because it supplies the header.
 
 A token in a query string is a token in a server log, and `<audio src>` can
 carry nothing else. It is a gate on the synthesiser, not a secret worth much:
