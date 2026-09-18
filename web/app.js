@@ -9,6 +9,7 @@ import { prepare, estimateSeconds } from './speech.js';
 import {
   Player, WebSpeechBackend, ServerTtsBackend,
   loadVoices, rankVoices, installVoiceHint, speechStopsInBackground, clips,
+  setTtsToken,
 } from './player.js';
 import {
   shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts, recentlyAdded,
@@ -36,6 +37,7 @@ const els = {
   pager: $('pager'), pagePrev: $('page-prev'), pageNext: $('page-next'), pageLabel: $('page-label'),
   playerbar: $('playerbar'), nowTitle: $('now-title'), nowSub: $('now-sub'),
   voiceSelect: $('voice-select'), rateSelect: $('rate-select'), refresh: $('refresh'),
+  ttsTokenButton: $('tts-token'),
   prev: $('prev'), toggle: $('toggle'), next: $('next'), stop: $('stop'),
   progress: $('progress'), progressLabel: $('progress-label'),
 };
@@ -183,6 +185,36 @@ function speakText(text, { title = '', subtitle = '', button = null, id = '' } =
   player.load(segments, chooseBackend());
   player.setRate(settings.rate);
   player.play(0);
+}
+
+const TTS_TOKEN_KEY = 'tamchai.tts-token';
+
+// The server voice reaches Microsoft on the server's behalf, so an install that
+// is exposed to more than the tailnet asks for a token before it will. It lives
+// in this browser only — /api/config says whether one is wanted and never what
+// it is, so opening the page is not the same as being allowed to synthesise.
+function restoreTtsToken() {
+  if (!state.config.tts_token_required || state.config.tts_trusted) return;
+  els.ttsTokenButton.hidden = false;
+  let saved = '';
+  try { saved = localStorage.getItem(TTS_TOKEN_KEY) || ''; } catch { saved = ''; }
+  setTtsToken(saved);
+  markTtsToken(saved);
+  if (!saved) showBanner('伺服器朗讀要密碼 — 撳右上角「設定密碼」。', false, { seconds: 8 });
+}
+
+function markTtsToken(token) {
+  els.ttsTokenButton.textContent = token ? '密碼已設定' : '設定密碼';
+  els.ttsTokenButton.classList.toggle('set', Boolean(token));
+}
+
+function saveTtsToken(token) {
+  setTtsToken(token);
+  markTtsToken(token);
+  try {
+    if (token) localStorage.setItem(TTS_TOKEN_KEY, token);
+    else localStorage.removeItem(TTS_TOKEN_KEY);
+  } catch { /* private window: this session only */ }
 }
 
 function chooseBackend() {
@@ -1419,6 +1451,13 @@ function retimeDayCards() {
   }
 }
 
+els.ttsTokenButton.addEventListener('click', () => {
+  const given = prompt('伺服器朗讀密碼', '');
+  if (given === null) return;                 // cancelled: leave what is there
+  saveTtsToken(given.trim());
+  showBanner(given.trim() ? '密碼已記低。' : '已清除密碼。', false, { seconds: 4 });
+});
+
 els.voiceSelect.addEventListener('change', () => {
   settings.voiceId = els.voiceSelect.value;
   localStorage.setItem('tamchai.voice', settings.voiceId);
@@ -1531,6 +1570,7 @@ document.addEventListener('keydown', (event) => {
   } catch {
     state.config = { tts_voices: [] };
   }
+  restoreTtsToken();
   await setupVoices();
   if (!location.hash) location.hash = buildRoute({ view: 'digests' });
   state.route = parseRoute(location.hash);

@@ -40,8 +40,10 @@ tailscale serve  --bg --https=443 http://127.0.0.1:8082   # tailnet only
 tailscale funnel --bg 8082                                # public internet
 ```
 
-Funnel publishes the page to anyone with the URL, and `/api/tts` along with it;
-there is no authentication in front of either.
+Funnel publishes the page to anyone with the URL, and `/api/tts` along with it
+— so before funnelling anything, read **Who may synthesise** below and set a
+token. The page itself is unauthenticated either way; what the token protects is
+the synthesiser behind it.
 
 ## Docker
 
@@ -210,6 +212,64 @@ the page says so in the rail and keeps the history for the session only.
 The view, filter and page live in the URL hash, so `#/digests?topic=AI&page=2` is a
 link you can send someone, and the back button behaves.
 
+### Who may synthesise
+
+`/api/tts` is a **proxy, not a synthesiser**. `edge-tts` reaches Edge's Read
+Aloud websocket at `speech.platform.bing.com`, carrying a hardcoded trusted
+client token and a `Sec-MS-GEC` header computed from clock skew — an endpoint
+reverse-engineered from the browser, with no account behind it. There is no bill
+to run up. What an open endpoint spends is **this box's standing** with a
+service that has nobody to appeal to: somebody else's abuse, and 朗讀 simply
+stops working one morning.
+
+Two controls, and they answer different questions:
+
+| | |
+|---|---|
+| **`tts_token`** | *May you synthesise at all.* Empty means no check — right for a loopback bind, wrong the moment `funnel` is involved. The browser keeps it in `localStorage`; `/api/config` reports only *whether* one is wanted, never what it is, so loading the page is not the same as being allowed to use it. |
+| **`tts_chars_per_hour`** | *How much.* A per-caller budget in characters, because characters are what the far end meters. Defaults to 60,000/hour against a 20,000 burst — about 3.7× continuous listening, which is generous for a person and bounded for a stranger. |
+
+Both are skipped for loopback and the tailnet (`100.64.0.0/10`,
+`fd7a:115c:a1e0::/48`), so nothing changes on the laptop or over `tailscale
+serve`.
+
+**A cache hit is never charged.** The budget meters what leaves this box, and a
+hit sends nothing — which also means a stranger feeding it fresh text, every
+piece of which is a miss by construction, pays for all of it.
+
+Two separate questions, and conflating them is how this went wrong once
+already. *May this caller skip the controls* is loopback and the tailnet. *May I
+believe this peer's `X-Forwarded-For`* is a question about the hop — loopback and
+the Docker bridge ranges, because `serve`, `funnel` and Docker all replace the
+socket address with a local one and set the header instead. Taken from anywhere
+else the header is the caller's own writing, and believing it would let a
+stranger claim the tailnet.
+
+Everything on that second list has to be unreachable from outside the host.
+Compose publishes to `127.0.0.1` only, which is what makes the bridge ranges safe
+to list — **a container opened to the LAN would let a neighbour forge the
+header**, which is one more reason not to.
+
+In the container with nothing in front of it, there is no header and every
+caller is the bridge gateway, so they share one budget and none of them are
+exempt. Putting `tailscale serve` in front is what restores per-caller
+accounting, because it supplies the header.
+
+A token in a query string is a token in a server log, and `<audio src>` can
+carry nothing else. It is a gate on the synthesiser, not a secret worth much:
+the real bound on a public URL is the budget, which needs no secret at all.
+
+#### Azure
+
+With `azure_key` and `azure_region` set, `/api/speech-token` mints a ten-minute
+Azure token and the browser talks to Azure **directly**. `zh-HK-HiuGaai`,
+`HiuMaan` and `WanLung` are Azure's own voices — the same ones `edge-tts`
+reaches through the undocumented door. The difference is an account: a
+documented quota, a key that can be rotated, and abuse that spends the token's
+allowance instead of this box's reputation.
+
+The key never leaves the server.
+
 ### Voices
 
 Two interchangeable back-ends, chosen automatically and overridable from the picker:
@@ -239,7 +299,8 @@ through everything unheard.
 |---|---|
 | `GET /api/feed` | the upstream payload — digests, topics, channels, feeds, tasks — plus a `_meta` block. Forwards `topics`, `channel`, `page` and `date`; anything else is dropped |
 | `GET /api/daily` | `{days: [{day, headline, text, chars, est_seconds, …}], cached, upstream_error, tts_voices}` |
-| `GET /api/tts` | `?text=&voice=&rate=±N%` → `audio/mpeg` |
+| `GET /api/tts` | `?text=&voice=&rate=±N%` → `audio/mpeg`. `401` without the token, `429` with `Retry-After` once the budget is spent |
+| `GET /api/speech-token` | a 10-minute Azure Speech token, so the browser can talk to Azure itself. `503` unless `azure_key` and `azure_region` are set |
 | `GET /api/config` | `{base_url, feed_ttl, chars_per_second, tts, tts_voices}` |
 | `GET /api/health` | `{ok, tts}` |
 
@@ -270,7 +331,7 @@ when you return to a tab that was left open past that time.
 ```
 Dockerfile            the image: python:3.13-slim + edge-tts, non-root
 docker-compose.yml    the stack: loopback port, archive volume, base_url
-config.json           base_url and the rest of the knobs
+config.json           base_url, the tts token and budget, and the rest of the knobs
 server.py             sidecar: upstream proxy + per-query cache + archive + on-demand TTS
 web/feed.js           upstream JSON → view models, routing (pure, unit-tested)
 web/listened.js       listened-to state: IndexedDB + the pure state arithmetic
@@ -279,7 +340,7 @@ web/player.js         playback queue + the two voice back-ends
 web/app.js            UI wiring: router, four views, speak buttons
 web/icon.svg          the app mark — a 譚仔 bowl broadcasting
 tools/make_icons.py   redraws icon.svg into favicon.ico and the PNG sizes
-tests/                node --test  ·  npm test
+tests/                node --test (web/) + unittest (server.py)  ·  npm test
 docs/ARCHITECTURE.md  the design and the constraints behind it
 docs/IDEAS.md         everything on the table, from the obvious to the daft
 docs/ROADMAP.md       what is actually being built next, in order

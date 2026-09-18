@@ -18,12 +18,14 @@ import argparse
 import asyncio
 import datetime
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import re
 import threading
 import time
+import ipaddress
 import urllib.error
 import urllib.request
 from collections import OrderedDict
@@ -45,6 +47,19 @@ DEFAULTS = {
     "chars_per_second": 4.5,    # measured against zh-HK neural voices at rate 1.0
     "host": "127.0.0.1",
     "port": 8082,
+
+    # /api/tts reaches Microsoft on this box's behalf, so an open one spends
+    # this box's reputation. Empty token = no check, which is right on a
+    # loopback-only bind and wrong the moment `tailscale funnel` is involved.
+    "tts_token": "",
+    "tts_burst_chars": 20000,   # a listener's opening run, uninterrupted
+    "tts_chars_per_hour": 60000,  # ~3.7x continuous listening at 4.5 chars/sec
+
+    # Azure Speech: the documented door to the same zh-HK voices. With a key
+    # set, the browser is handed a 10-minute token and talks to Azure itself,
+    # so the quota it burns is the token's and never this box's reputation.
+    "azure_key": "",
+    "azure_region": "",
 }
 
 # config.json key -> environment variable that overrides it.
@@ -54,6 +69,9 @@ ENV_KEYS = {
     "upstream_timeout": "TAMCHAI_UPSTREAM_TIMEOUT",
     "host": "TAMCHAI_HOST",
     "port": "TAMCHAI_PORT",
+    "tts_token": "TAMCHAI_TTS_TOKEN",
+    "azure_key": "TAMCHAI_AZURE_KEY",
+    "azure_region": "TAMCHAI_AZURE_REGION",
 }
 
 TTS_VOICES = [
@@ -63,6 +81,40 @@ TTS_VOICES = [
 ]
 TTS_CACHE_MAX_BYTES = 64 * 1024 * 1024
 TTS_MAX_CHARS = 400
+
+# Two different questions, and conflating them is how this went wrong once
+# already.
+#
+# TRUSTED_NETS answers *may this caller skip the token and the budget* —
+# loopback and the ranges Tailscale hands out, which is to say the owner.
+TRUSTED_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "::1/128",
+    "100.64.0.0/10",          # tailnet IPv4 (CGNAT)
+    "fd7a:115c:a1e0::/48",    # tailnet IPv6
+))
+
+# PROXY_NETS answers *may I believe this peer's X-Forwarded-For*, which is a
+# question about the hop, not the caller. In the container every request
+# arrives from the bridge gateway (172.x), so testing the peer against
+# TRUSTED_NETS threw away Tailscale's header and billed the whole tailnet to
+# one address.
+#
+# Everything here must be unreachable from outside the host. compose publishes
+# to 127.0.0.1 only, which is what makes the bridge ranges safe to list; a
+# container opened to the LAN would let a neighbour forge the header, and the
+# README says not to do that for this reason among others.
+PROXY_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "::1/128",
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # docker bridge / vpnkit
+))
+
+# How many distinct clients the budget tracks. Past this the oldest is dropped
+# — which hands a fresh budget to whoever is evicted, so the cap has to be high
+# enough that reaching it means a botnet, against which a per-IP limit was
+# never the defence anyway.
+BUDGET_MAX_CLIENTS = 4096
+
+AZURE_TOKEN_TTL = 540.0       # Azure issues 10-minute tokens; renew at 9
 
 # The cache key is built from query parameters the caller chooses, so the set of
 # possible keys is unbounded: ?page=1, ?page=2, ?page=99999 are three entries.
@@ -114,7 +166,8 @@ def load_config(path: Path = CONFIG_PATH, overrides: dict | None = None) -> dict
             config[key] = value
 
     config["base_url"] = str(config["base_url"]).rstrip("/")
-    for key in ("feed_ttl", "upstream_timeout", "chars_per_second"):
+    for key in ("feed_ttl", "upstream_timeout", "chars_per_second",
+                "tts_burst_chars", "tts_chars_per_hour"):
         config[key] = float(config[key])
     config["port"] = int(config["port"])
     return config
@@ -294,6 +347,110 @@ class Upstream:
         return out
 
 
+# ------------------------------------------------------------------- who is calling
+
+
+def in_nets(addr: str, nets) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr.strip().strip("[]").split("%")[0])
+    except ValueError:
+        return False
+    return any(ip in net for net in nets)
+
+
+def client_ip(peer: str, forwarded: str | None, proxies=PROXY_NETS) -> str:
+    """The address to hold responsible.
+
+    `tailscale serve` and `funnel` proxy to loopback, and Docker proxies to the
+    bridge gateway, so the socket says one local address for the whole public
+    internet. Both set X-Forwarded-For, so when the peer is a hop we put there
+    ourselves that header is the better answer.
+
+    It is only better *because* the peer is one of ours. Taken from anywhere
+    else it is a header the caller writes, and believing it would let a
+    stranger claim the tailnet and skip both controls.
+    """
+    if forwarded and in_nets(peer, proxies):
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return peer
+
+
+def is_trusted(addr: str) -> bool:
+    """True for loopback and the tailnet — no token, no budget."""
+    return in_nets(addr, TRUSTED_NETS)
+
+
+class CharBudget:
+    """Per-client budget for characters sent onward to Microsoft.
+
+    Characters, not requests, because characters are what the far end meters.
+    A continuous listener spends about 16k an hour at 4.5 chars/sec, so the
+    default hourly figure leaves room for several devices and a pre-fetch or
+    two while still bounding what one stranger can spend.
+    """
+
+    def __init__(self, burst: float, per_hour: float, max_clients: int = BUDGET_MAX_CLIENTS):
+        self._burst = float(burst)
+        self._per_second = float(per_hour) / 3600.0
+        self._max_clients = max_clients
+        self._clients: OrderedDict[str, tuple[float, float]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def charge(self, who: str, chars: int, now: float | None = None) -> float:
+        """Seconds the caller must wait. 0 means the charge went through."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            left, seen = self._clients.get(who, (self._burst, now))
+            left = min(self._burst, left + (now - seen) * self._per_second)
+            short = chars - left
+            if short > 0:
+                self._clients[who] = (left, now)
+                self._clients.move_to_end(who)
+                return short / self._per_second if self._per_second else float("inf")
+            self._clients[who] = (left - chars, now)
+            self._clients.move_to_end(who)
+            while len(self._clients) > self._max_clients:
+                self._clients.popitem(last=False)
+            return 0.0
+
+
+class AzureToken:
+    """A short-lived Azure Speech token, minted here so the key never ships.
+
+    The browser gets ten minutes of access and talks to Azure directly; the
+    quota it spends is Azure's, metered against a key we can rotate, instead of
+    this box's standing with an endpoint that has no account behind it at all.
+    """
+
+    def __init__(self, key: str, region: str):
+        self.key, self.region = key, region
+        self._token, self._minted = "", 0.0
+        self._lock = threading.Lock()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.key and self.region)
+
+    def get(self) -> tuple[str, float]:
+        """`(token, seconds_left)`, minting a new one only once it is nearly up."""
+        with self._lock:
+            age = time.monotonic() - self._minted
+            if self._token and age < AZURE_TOKEN_TTL:
+                return self._token, AZURE_TOKEN_TTL - age
+            request = urllib.request.Request(
+                f"https://{self.region}.api.cognitive.microsoft.com/sts/v1.0/issueToken",
+                data=b"",
+                headers={"Ocp-Apim-Subscription-Key": self.key, "Content-Length": "0"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                self._token = response.read().decode("utf-8")
+            self._minted = time.monotonic()
+            return self._token, AZURE_TOKEN_TTL
+
+
 # ---------------------------------------------------------------------------- tts
 
 
@@ -315,8 +472,17 @@ class TtsCache:
         self._lock = threading.Lock()
         self._inflight: dict[str, threading.Lock] = {}
 
+    @staticmethod
+    def _key(text: str, voice: str, rate: str) -> str:
+        return hashlib.sha1(f"{voice}|{rate}|{text}".encode("utf-8")).hexdigest()
+
+    def has(self, text: str, voice: str, rate: str) -> bool:
+        """Already synthesised, so serving it costs nothing outbound."""
+        with self._lock:
+            return self._key(text, voice, rate) in self._items
+
     def get(self, text: str, voice: str, rate: str) -> bytes:
-        key = hashlib.sha1(f"{voice}|{rate}|{text}".encode("utf-8")).hexdigest()
+        key = self._key(text, voice, rate)
         with self._lock:
             if key in self._items:
                 self._items.move_to_end(key)
@@ -360,6 +526,8 @@ class Handler(BaseHTTPRequestHandler):
 
     upstream: Upstream
     tts: TtsCache
+    budget: CharBudget
+    azure: AzureToken
     config: dict
 
     def do_GET(self) -> None:  # noqa: N802
@@ -372,6 +540,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._api_daily(query)
             elif url.path == "/api/tts":
                 self._api_tts(query)
+            elif url.path == "/api/speech-token":
+                self._api_speech_token(query)
             elif url.path == "/api/config":
                 self._send_json({
                     "base_url": self.config["base_url"],
@@ -379,6 +549,11 @@ class Handler(BaseHTTPRequestHandler):
                     "chars_per_second": self.config["chars_per_second"],
                     "tts": tts_available(),
                     "tts_voices": TTS_VOICES if tts_available() else [],
+                    # Whether a token is wanted, never the token itself: this
+                    # response is readable by anyone who can load the page.
+                    "tts_token_required": bool(self.config["tts_token"]),
+                    "tts_trusted": is_trusted(self._who()),
+                    "azure": self.azure.configured,
                 })
             elif url.path == "/api/health":
                 self._send_json({"ok": True, "tts": tts_available()})
@@ -413,7 +588,35 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(self.upstream.daily(force=force, window=self._window_of(query)),
                         cache="no-store")
 
+    def _who(self) -> str:
+        return client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"))
+
+    def _denied(self, query: dict) -> str | None:
+        """The reason this caller may not synthesise, or None."""
+        wanted = self.config["tts_token"]
+        if not wanted or is_trusted(self._who()):
+            return None
+        # <audio src> cannot carry a header, so the query string has to be
+        # allowed to carry the token; the header is offered for anything else.
+        given = self.headers.get("X-Tamchai-Token") or (query.get("token") or [""])[0]
+        return None if hmac.compare_digest(given, wanted) else "bad token"
+
+    def _api_speech_token(self, query: dict) -> None:
+        if (why := self._denied(query)) is not None:
+            return self._send_json({"error": why}, HTTPStatus.UNAUTHORIZED)
+        if not self.azure.configured:
+            return self._send_json({"error": "azure not configured"},
+                                   HTTPStatus.SERVICE_UNAVAILABLE)
+        try:
+            token, expires_in = self.azure.get()
+        except (urllib.error.URLError, OSError) as exc:
+            return self._send_json({"error": f"azure: {exc}"}, HTTPStatus.BAD_GATEWAY)
+        self._send_json({"token": token, "region": self.azure.region,
+                         "expires_in": round(expires_in)})
+
     def _api_tts(self, query: dict) -> None:
+        if (why := self._denied(query)) is not None:
+            return self._send_json({"error": why}, HTTPStatus.UNAUTHORIZED)
         text = (query.get("text") or [""])[0].strip()
         voice = (query.get("voice") or [TTS_VOICES[0]["id"]])[0]
         # A literal "+" in a query string decodes to a space, so "+10%" arrives as " 10%".
@@ -430,6 +633,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": "bad rate"}, HTTPStatus.BAD_REQUEST)
         if not tts_available():
             return self._send_json({"error": "edge-tts not installed"}, HTTPStatus.SERVICE_UNAVAILABLE)
+        # A cache hit goes out free: the budget meters what leaves this box for
+        # Microsoft, and a hit sends nothing. It also means repeating yourself
+        # is cheap while a stranger feeding it fresh text — every one of which
+        # is a miss by construction — pays for all of it.
+        if not (is_trusted(self._who()) or self.tts.has(text, voice, rate)):
+            if wait := self.budget.charge(self._who(), len(text)):
+                self.send_response(HTTPStatus.TOO_MANY_REQUESTS)
+                self.send_header("Retry-After", str(max(1, round(wait))))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
         audio = self.tts.get(text, voice, rate)
         self._send_bytes(audio, "audio/mpeg", cache="public, max-age=86400")
 
@@ -497,6 +711,11 @@ def main() -> None:
     Handler.config = config
     Handler.upstream = Upstream(config, Path(args.archive) if args.archive else None)
     Handler.tts = TtsCache()
+    Handler.budget = CharBudget(config["tts_burst_chars"], config["tts_chars_per_hour"])
+    Handler.azure = AzureToken(config["azure_key"], config["azure_region"])
+    if not config["tts_token"] and config["host"] not in ("127.0.0.1", "::1", "localhost"):
+        print("warning: /api/tts has no token and is not bound to loopback — "
+              "set tts_token if anything but the tailnet can reach it", flush=True)
     httpd = ThreadingHTTPServer((config["host"], config["port"]), Handler)
     print(f"tamchainews on http://{config['host']}:{config['port']}  "
           f"upstream={config['base_url']}  "
