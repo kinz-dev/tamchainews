@@ -19,10 +19,12 @@ import asyncio
 import datetime
 import hashlib
 import hmac
+import io
 import json
 import mimetypes
 import os
 import re
+import tarfile
 import threading
 import time
 import ipaddress
@@ -525,6 +527,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     upstream: Upstream
+    archive_dir: Path | None
     tts: TtsCache
     budget: CharBudget
     azure: AzureToken
@@ -542,6 +545,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._api_tts(query)
             elif url.path == "/api/speech-token":
                 self._api_speech_token(query)
+            elif url.path == "/api/archive.tar.gz":
+                self._api_archive()
             elif url.path == "/api/config":
                 self._send_json({
                     "base_url": self.config["base_url"],
@@ -554,6 +559,7 @@ class Handler(BaseHTTPRequestHandler):
                     "tts_token_required": bool(self.config["tts_token"]),
                     "tts_trusted": is_trusted(self._who()),
                     "azure": self.azure.configured,
+                    "archive": bool(self.archive_dir and self.archive_dir.is_dir()),
                 })
             elif url.path == "/api/health":
                 self._send_json({"ok": True, "tts": tts_available()})
@@ -613,6 +619,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"error": f"azure: {exc}"}, HTTPStatus.BAD_GATEWAY)
         self._send_json({"token": token, "region": self.azure.region,
                          "expires_in": round(expires_in)})
+
+    def _api_archive(self) -> None:
+        """Every archived day as one gzipped tar.
+
+        The archive is the only thing here upstream does not also have — it
+        keeps three days and this keeps all of them — so the ability to walk
+        away with it matters more than any feature built on top of it. Built in
+        memory because a year of days is a few megabytes of JSON.
+        """
+        if not self.archive_dir or not self.archive_dir.is_dir():
+            return self._send_json({"error": "no archive"}, HTTPStatus.NOT_FOUND)
+        days = sorted(self.archive_dir.glob("*.json"))
+        if not days:
+            return self._send_json({"error": "archive is empty"}, HTTPStatus.NOT_FOUND)
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            for day in days:
+                archive.add(day, arcname=f"archive/{day.name}")
+        body = buffer.getvalue()
+        stamp = datetime.date.today().isoformat()
+        self._send_bytes(body, "application/gzip", cache="no-store",
+                         disposition=f'attachment; filename="tamchai-archive-{stamp}.tar.gz"')
 
     def _api_tts(self, query: dict) -> None:
         if (why := self._denied(query)) is not None:
@@ -677,13 +705,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send_bytes(body, "application/json; charset=utf-8", status, cache)
 
     def _send_bytes(self, body: bytes, ctype: str, status: HTTPStatus = HTTPStatus.OK,
-                    cache: str = "no-store", etag: str | None = None) -> None:
+                    cache: str = "no-store", etag: str | None = None,
+                    disposition: str | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache)
         if etag:
             self.send_header("ETag", etag)
+        if disposition:
+            self.send_header("Content-Disposition", disposition)
         self.end_headers()
         self.wfile.write(body)
 
@@ -709,7 +740,8 @@ def main() -> None:
     })
 
     Handler.config = config
-    Handler.upstream = Upstream(config, Path(args.archive) if args.archive else None)
+    Handler.archive_dir = Path(args.archive) if args.archive else None
+    Handler.upstream = Upstream(config, Handler.archive_dir)
     Handler.tts = TtsCache()
     Handler.budget = CharBudget(config["tts_burst_chars"], config["tts_chars_per_hour"])
     Handler.azure = AzureToken(config["azure_key"], config["azure_region"])

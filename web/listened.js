@@ -241,6 +241,53 @@ function openDb() {
  * go to both. `persistent` says whether anything actually reached disk, which
  * the UI uses to admit when history will not survive a reload.
  */
+// How many times a topic must be skipped before the app says anything.
+export const BORED_AFTER = 3;
+
+/**
+ * Topics skipped repeatedly without being finished.
+ *
+ * Taste, inferred rather than asked for. Stopping a clip early is the one
+ * signal the reader gives without being prompted, and three in a row on the
+ * same topic is a preference — but only a *streak* counts, so one dull morning
+ * about a topic you otherwise want does not demote it.
+ */
+export function boredTopics(skips = {}, threshold = BORED_AFTER) {
+  return Object.entries(skips)
+    .filter(([, streak]) => streak >= threshold)
+    .map(([topic]) => topic)
+    .sort();
+}
+
+/** A skip lengthens the streak; finishing anything on the topic clears it. */
+export function noteSkip(skips = {}, topic, finished = false) {
+  if (!topic) return skips;
+  const next = { ...skips };
+  if (finished) delete next[topic];
+  else next[topic] = (next[topic] || 0) + 1;
+  return next;
+}
+
+/**
+ * The voice and rate to open a topic with.
+ *
+ * Finance wants a brisk WanLung and a transcript wants a slow HiuMaan, and
+ * that preference is stable — so it is worth storing per topic rather than
+ * being reset by hand twice a day.
+ */
+export function prefsForTopic(prefs = {}, topic, fallback = {}) {
+  const saved = (topic && prefs[topic]) || {};
+  return {
+    voiceId: saved.voiceId || fallback.voiceId || '',
+    rate: saved.rate || fallback.rate || 1,
+  };
+}
+
+export function rememberTopicPrefs(prefs = {}, topic, { voiceId, rate }) {
+  if (!topic) return prefs;
+  return { ...prefs, [topic]: { voiceId, rate } };
+}
+
 export class ListenStore {
   constructor() {
     this.records = new Map();

@@ -5,6 +5,7 @@ import {
   makeCheckpoint, isResumable, RESUME_MAX_AGE_MS, resumePoint, parseDailyId,
   kindOf, nextPlayable, isLeaf, containedBy, allContainedHeard,
   digestListenIds, anyUnheard,
+  boredTopics, noteSkip, prefsForTopic, rememberTopicPrefs, BORED_AFTER,
 } from '../web/listened.js';
 
 test('ids are stable and distinguish the thing being listened to', () => {
@@ -251,4 +252,63 @@ test('the badge clears only once every recent block is finished', () => {
 test('nothing recent means nothing to flag', () => {
   assert.equal(anyUnheard([], new Map()), false);
   assert.equal(anyUnheard(), false);
+});
+
+
+// -------------------------------------------------------------- boredom signal
+
+test('a topic skipped three times running is boring', () => {
+  let skips = {};
+  for (let i = 0; i < BORED_AFTER; i += 1) skips = noteSkip(skips, 'AI');
+  assert.deepEqual(boredTopics(skips), ['AI']);
+});
+
+test('two skips are not enough', () => {
+  const skips = noteSkip(noteSkip({}, 'AI'), 'AI');
+  assert.deepEqual(boredTopics(skips), []);
+});
+
+test('finishing one clears the streak', () => {
+  // Otherwise a topic you mostly want gets demoted by one dull morning.
+  let skips = {};
+  for (let i = 0; i < BORED_AFTER; i += 1) skips = noteSkip(skips, 'AI');
+  skips = noteSkip(skips, 'AI', true);
+  assert.deepEqual(boredTopics(skips), []);
+});
+
+test('topics are counted apart', () => {
+  let skips = {};
+  for (let i = 0; i < BORED_AFTER; i += 1) skips = noteSkip(skips, 'AI');
+  skips = noteSkip(skips, '財經');
+  assert.deepEqual(boredTopics(skips), ['AI']);
+});
+
+test('noteSkip does not mutate what it was given', () => {
+  const before = { AI: 1 };
+  noteSkip(before, 'AI');
+  assert.deepEqual(before, { AI: 1 });
+});
+
+test('a skip with no topic changes nothing', () => {
+  assert.deepEqual(noteSkip({ AI: 1 }, ''), { AI: 1 });
+});
+
+// ------------------------------------------------------------ per-topic voice
+
+test('a topic falls back to the global voice until it has its own', () => {
+  const fallback = { voiceId: 'web:Sinji', rate: 1 };
+  assert.deepEqual(prefsForTopic({}, '財經', fallback), fallback);
+});
+
+test('a remembered topic keeps its own voice and rate', () => {
+  const prefs = rememberTopicPrefs({}, '財經', { voiceId: 'server:WanLung', rate: 1.3 });
+  assert.deepEqual(
+    prefsForTopic(prefs, '財經', { voiceId: 'web:Sinji', rate: 1 }),
+    { voiceId: 'server:WanLung', rate: 1.3 },
+  );
+});
+
+test('one topic does not borrow another topic settings', () => {
+  const prefs = rememberTopicPrefs({}, '財經', { voiceId: 'server:WanLung', rate: 1.3 });
+  assert.equal(prefsForTopic(prefs, 'AI', { voiceId: 'web:Sinji', rate: 1 }).rate, 1);
 });

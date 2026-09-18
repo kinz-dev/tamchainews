@@ -97,18 +97,6 @@ nothing in the app uses it yet.
 | **Lock-screen widget** | 今日三條. | L |
 | **Email digest** | With the audio attached. | S |
 
-## 譚仔 · Lean into the name
-
-The metaphor is sitting right there and it is a genuinely good interface.
-
-| | | |
-|---|---|---|
-| **辣度** | A spice slider from 小辣 (headlines only, sixty seconds) to 十小辣 (everything, citations read aloud). A density control everyone already knows how to use. | M |
-| **麵種** | Presets bundling topic filter, voice, speed and length. 「今日嗌米線」 = your usual. | S |
-| **加底 / 走青** | 「呢個類別多啲」「唔好再講加密貨幣」. Feeds the same ordering as the boredom signal. | S |
-| **個碗會裝滿** | The bowl in `icon.svg` fills as you work through the day's queue, and steams when something new lands. The icon is already generated from geometry — animate the same geometry. | S |
-| **譚仔收據** | End of day, a printed-receipt-style summary of what you consumed, itemised, with a fake total. Printable, silly, and a better retention hook than any stats page. | S |
-
 ## 平台 · Infrastructure
 
 | | | |
@@ -119,7 +107,7 @@ The metaphor is sitting right there and it is a genuinely good interface.
 | **Trigger upstream's cron** | Upstream exposes no such endpoint and `admin` is false for us, so ↻ can only ever fetch its *latest*. A tiny companion agent on the sesame box that does expose one would make ↻ mean 「而家去睇」. | M |
 | **Feed health alerting** | 訊源狀態 already knows. Make it push when a source has been dark for twelve hours. | S |
 | **Archive export** | One command, a tarball of every day as Markdown and JSON, so what you have collected outlives the app. | S |
-| **Auth on `/api/tts`** | Funnel publishes the page *and* the synthesiser to anyone with the URL. A token and a rate limit are what stand between that and a stranger's TTS farm. | S |
+| ~~**Auth on `/api/tts`**~~ ✅ | Funnel publishes the page *and* the synthesiser to anyone with the URL. A token and a rate limit are what stand between that and a stranger's TTS farm. | S |
 | **Time-travel skin** | `#/digests?date=2026-03-04` already works. Add a skin that shows only what was known *then* — no hindsight, no later corrections. | S |
 
 ## 最野 · The daft end

@@ -82,6 +82,15 @@
     </div>
 
     <div class="rail-section">
+      <h2 class="rail-title">讀音</h2>
+      <p class="rail-note">一行一條，<code>寫法=讀法</code>。<code>#</code> 開頭係註解。</p>
+      <textarea id="lexicon" class="rail-text" rows="4" spellcheck="false"
+                placeholder="NVDA=輝達&#10;恒指=恆生指數"></textarea>
+      <p id="lexicon-note" class="rail-note" hidden></p>
+      <button id="export-archive" class="rail-button" type="button" hidden>⤓ 匯出存檔</button>
+    </div>
+
+    <div class="rail-section">
       <h2 class="rail-title">頻道 <span id="channel-count" class="rail-count"></span></h2>
       <input id="channel-filter" class="rail-search" type="search" placeholder="搜尋頻道…" autocomplete="off">
       <ul id="channel-list" class="rail-list channels"></ul>

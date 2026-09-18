@@ -3,7 +3,7 @@ import test from 'node:test';
 import {
   shapeDigest, groupByTopic, splitRefs, feedHealth, topicCounts,
   hostOf, relativeTime, parseRoute, buildRoute, routeToParams, healthSummary,
-  recentlyAdded, NEW_WINDOW_MS,
+  recentlyAdded, NEW_WINDOW_MS, darkFeeds, darkSummary, channelShare,
 } from '../web/feed.js';
 
 const DIGEST = {
@@ -210,4 +210,80 @@ test('a digest stamped in the future is still new, not excluded', () => {
   const now = Date.parse('2026-09-18T12:00:00Z');
   const ahead = [{ check_id: 1, checked_at: Math.round(now / 1000 + 600) }];
   assert.equal(recentlyAdded(ahead, { now }).length, 1);
+});
+
+
+// ------------------------------------------------------------------ dark feeds
+
+const NOW = 1_800_000_000_000;                 // fixed clock, in ms
+const hoursAgo = (h) => NOW / 1000 - h * 3600; // upstream reports seconds
+
+test('a feed quiet past the threshold is dark', () => {
+  const dark = darkFeeds([{ name: '明報', ok: true, last_ok: hoursAgo(20) }], NOW);
+  assert.equal(dark.length, 1);
+  assert.equal(dark[0].name, '明報');
+  assert.equal(Math.round(dark[0].hours), 20);
+});
+
+test('a feed that fetched recently is not', () => {
+  assert.deepEqual(darkFeeds([{ name: '明報', ok: true, last_ok: hoursAgo(3) }], NOW), []);
+});
+
+test('a failing feed is left to feedHealth', () => {
+  // It is already reported as failing; naming it twice helps nobody.
+  assert.deepEqual(darkFeeds([{ name: '壞咗', ok: false, last_ok: hoursAgo(99) }], NOW), []);
+});
+
+test('a feed that has never succeeded is pending, not dark', () => {
+  assert.deepEqual(darkFeeds([{ name: '未抓', ok: true, last_ok: 0 }], NOW), []);
+});
+
+test('the quietest feed is named first', () => {
+  const dark = darkFeeds([
+    { name: '近', ok: true, last_ok: hoursAgo(13) },
+    { name: '遠', ok: true, last_ok: hoursAgo(50) },
+  ], NOW);
+  assert.deepEqual(dark.map((d) => d.name), ['遠', '近']);
+});
+
+test('the summary names one feed and counts several', () => {
+  assert.equal(darkSummary([]), '');
+  assert.match(darkSummary(darkFeeds([{ name: '明報', ok: true, last_ok: hoursAgo(20) }], NOW)), /明報.*20/);
+  const many = darkFeeds([
+    { name: 'a', ok: true, last_ok: hoursAgo(20) },
+    { name: 'b', ok: true, last_ok: hoursAgo(30) },
+  ], NOW);
+  assert.match(darkSummary(many), /2 個訊源/);
+});
+
+
+// --------------------------------------------------------------- channel share
+
+test('share is measured in characters, biggest first', () => {
+  const share = channelShare([
+    { channel: '少', summary: '一二三' },
+    { channel: '多', summary: '一二三四五六七' },
+  ]);
+  assert.deepEqual(share.map((c) => c.name), ['多', '少']);
+  assert.equal(share[0].chars, 7);
+  assert.equal(Math.round(share[0].share * 100), 70);
+});
+
+test('a channel appearing twice is added up', () => {
+  const share = channelShare([
+    { channel: '同一個', summary: '一二' },
+    { channel: '同一個', summary: '三四' },
+  ]);
+  assert.equal(share.length, 1);
+  assert.equal(share[0].chars, 4);
+  assert.equal(share[0].share, 1);
+});
+
+test('no content divides by nothing rather than NaN', () => {
+  const share = channelShare([{ channel: '空', summary: '' }]);
+  assert.equal(share[0].share, 0);
+});
+
+test('no sections is an empty list', () => {
+  assert.deepEqual(channelShare([]), []);
 });

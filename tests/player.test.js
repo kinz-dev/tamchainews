@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Player, rankVoices, installVoiceHint, speechStopsInBackground } from '../web/player.js';
+import {
+  Player, rankVoices, installVoiceHint, speechStopsInBackground, chooseVoiceId,
+  ServerTtsBackend,
+} from '../web/player.js';
 import { prepare } from '../web/speech.js';
 
 /** Stands in for a speech engine: records what it was asked to say. */
@@ -255,4 +258,63 @@ test('iOS is known to cut the browser voice off, other platforms are not', () =>
   assert.equal(speechStopsInBackground(mac, 'MacIntel', 0), false);
   // An iPad reports itself as a Mac, and does stop.
   assert.equal(speechStopsInBackground(mac, 'MacIntel', 5), true);
+});
+
+
+// ----------------------------------------------------------------- voice choice
+
+const cantonese = { voice: { voiceURI: 'Sinji', name: 'Sinji' }, score: 3, local: true };
+const mandarin = { voice: { voiceURI: 'Tingting', name: 'Tingting' }, score: 1, local: true };
+const serverVoices = [{ id: 'zh-HK-HiuGaaiNeural', name: '曉佳' }];
+
+test('a Cantonese browser voice is preferred to the server', () => {
+  assert.equal(chooseVoiceId([cantonese], serverVoices), 'web:Sinji');
+});
+
+test('a Mandarin browser voice loses to a Cantonese server voice', () => {
+  // The bug this exists for: rankVoices admits zh-TW and zh so that something
+  // reads when nothing better exists, and merely being in the list used to win.
+  // Reading Cantonese aloud in Mandarin is worse than a round trip.
+  assert.equal(chooseVoiceId([mandarin], serverVoices), 'server:zh-HK-HiuGaaiNeural');
+});
+
+test('a Mandarin browser voice is still better than silence', () => {
+  assert.equal(chooseVoiceId([mandarin], []), 'web:Tingting');
+});
+
+test('the best browser voice is the one considered', () => {
+  assert.equal(chooseVoiceId([cantonese, mandarin], serverVoices), 'web:Sinji');
+});
+
+test('where speech dies with the screen the server wins anyway', () => {
+  assert.equal(chooseVoiceId([cantonese], serverVoices, true), 'server:zh-HK-HiuGaaiNeural');
+});
+
+test('with nothing at all it picks nothing rather than throwing', () => {
+  assert.equal(chooseVoiceId([], []), '');
+});
+
+
+// ------------------------------------------------------------ two-voice reading
+
+test('quoted segments go to the second voice', () => {
+  const backend = new ServerTtsBackend('zh-HK-HiuGaaiNeural', '曉佳', {
+    quoteVoiceId: 'zh-HK-WanLungNeural',
+  });
+  assert.equal(backend.voiceFor({ role: 'body' }), 'zh-HK-HiuGaaiNeural');
+  assert.equal(backend.voiceFor({ role: 'quote' }), 'zh-HK-WanLungNeural');
+});
+
+test('without a second voice everything reads in the first', () => {
+  const backend = new ServerTtsBackend('zh-HK-HiuGaaiNeural', '曉佳');
+  assert.equal(backend.voiceFor({ role: 'quote' }), 'zh-HK-HiuGaaiNeural');
+  assert.equal(backend.voiceFor(undefined), 'zh-HK-HiuGaaiNeural');
+});
+
+test('the chosen voice reaches the request', () => {
+  const backend = new ServerTtsBackend('zh-HK-HiuGaaiNeural', '曉佳', {
+    quoteVoiceId: 'zh-HK-WanLungNeural',
+  });
+  const url = backend.url({ speak: '佢話', role: 'quote' }, 1);
+  assert.match(url, /voice=zh-HK-WanLungNeural/);
 });

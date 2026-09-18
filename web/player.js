@@ -169,12 +169,20 @@ let ttsToken = '';
 export function setTtsToken(token) { ttsToken = token || ''; }
 
 export class ServerTtsBackend {
-  constructor(voiceId, label) {
+  // `quoteVoiceId` reads segments tagged `quote`. Two voices is the cheapest
+  // change to how a digest sounds — one person reading a transcript becomes a
+  // newsroom — and it costs nothing but a different query parameter.
+  constructor(voiceId, label, { quoteVoiceId = '' } = {}) {
     this.voiceId = voiceId;
+    this.quoteVoiceId = quoteVoiceId;
     this.id = `server:${voiceId}`;
     this.label = label;
     this.background = true;   // an <audio> element survives a locked screen
     this._prefetched = new Set();
+  }
+
+  voiceFor(segment) {
+    return (this.quoteVoiceId && segment?.role === 'quote') ? this.quoteVoiceId : this.voiceId;
   }
 
   url(segment, rate) {
@@ -182,7 +190,7 @@ export class ServerTtsBackend {
     const sign = percent >= 0 ? '+' : '-';
     const params = new URLSearchParams({
       text: segment.speak,
-      voice: this.voiceId,
+      voice: this.voiceFor(segment),
       rate: `${sign}${Math.abs(percent)}%`,
     });
     // An <audio> element cannot send a header, so the token travels in the
@@ -450,6 +458,30 @@ export function rankVoices(voices) {
  * Where to find a Cantonese voice on this device, when it hasn't got one.
  * The only place platform detection earns its keep: the instructions differ.
  */
+/**
+ * Which voice to open with, given what this device has.
+ *
+ * An on-device voice is worth a lot, but only if it speaks the language. The
+ * ranking admits zh-TW and plain zh so that *something* reads when nothing
+ * better exists — which meant a Mandarin voice, merely by being in the list,
+ * outranked a server voice that actually speaks Cantonese. It reads the page
+ * out loud in the wrong language, fluently, which is worse than a round trip.
+ *
+ * So a browser voice wins only when it is genuinely Cantonese (score 3).
+ * Anything less is a last resort, taken only when there is no server voice.
+ *
+ * iOS is the exception pulling the other way: every browser voice there dies
+ * with the screen, so the server's is the only one that reads to the end.
+ */
+export function chooseVoiceId(ranked = [], serverVoices = [], stopsInBackground = false) {
+  const best = ranked[0];
+  const webId = best ? `web:${best.voice.voiceURI}` : '';
+  const serverId = serverVoices.length ? `server:${serverVoices[0].id}` : '';
+  if (!serverId) return webId;
+  if (!best || stopsInBackground) return serverId;
+  return best.score >= 3 ? webId : serverId;
+}
+
 export function installVoiceHint(userAgent = navigator.userAgent, platform = navigator.platform) {
   const isApple = /iPhone|iPad|iPod|Macintosh|Mac OS X/.test(userAgent)
     || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);   // iPadOS reports as a Mac

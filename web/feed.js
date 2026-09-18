@@ -96,6 +96,38 @@ export function feedHealth(feeds = []) {
 }
 
 /** One line summarising feed health, for the status strip. */
+const DARK_AFTER_HOURS = 12;
+
+/**
+ * Feeds that have gone quiet without going wrong.
+ *
+ * `feedHealth` only knows about feeds upstream has marked `ok: false`. A feed
+ * that last succeeded two days ago and has not been tried since is `ok: true`
+ * and invisible — and that is the failure that matters, because nothing on the
+ * page says so. The digests simply stop mentioning a source and the silence
+ * reads as "nothing happened" rather than "nobody looked".
+ */
+export function darkFeeds(feeds = [], now = Date.now(), hours = DARK_AFTER_HOURS) {
+  const cutoff = now / 1000 - hours * 3600;
+  return feeds
+    .filter((feed) => feed.ok !== false)
+    .map((feed) => ({
+      name: feed.name || '(未命名)',
+      lastOk: Number(feed.last_ok) || 0,
+      hours: (now / 1000 - (Number(feed.last_ok) || 0)) / 3600,
+    }))
+    // A feed that has never succeeded is `pending`, which feedHealth already
+    // reports; counting it dark too would say the same thing twice.
+    .filter((feed) => feed.lastOk > 0 && feed.lastOk < cutoff)
+    .sort((a, b) => a.lastOk - b.lastOk);
+}
+
+export function darkSummary(dark, hours = DARK_AFTER_HOURS) {
+  if (!dark.length) return '';
+  if (dark.length === 1) return `${dark[0].name} 已經 ${Math.floor(dark[0].hours)} 小時無新內容`;
+  return `${dark.length} 個訊源超過 ${hours} 小時無新內容`;
+}
+
 export function healthSummary(health) {
   const bits = [];
   if (health.failing.length) bits.push(`${health.failing.length} 個訊源失敗`);
@@ -104,6 +136,26 @@ export function healthSummary(health) {
 }
 
 /** Topic chips, with the channel count upstream reports for each. */
+/**
+ * How much of a topic each channel actually contributes.
+ *
+ * The rail lists every channel equally, which makes a feed that writes two
+ * lines a week look like one that writes the whole topic. Share is measured in
+ * characters of summary, because that is what you spend time listening to.
+ */
+export function channelShare(sections = []) {
+  const bytes = new Map();
+  for (const section of sections) {
+    const name = section.channel || section.name || '(未命名)';
+    const size = (section.summary || section.text || '').length;
+    bytes.set(name, (bytes.get(name) || 0) + size);
+  }
+  const total = [...bytes.values()].reduce((sum, n) => sum + n, 0);
+  return [...bytes.entries()]
+    .map(([name, chars]) => ({ name, chars, share: total ? chars / total : 0 }))
+    .sort((a, b) => b.chars - a.chars || a.name.localeCompare(b.name));
+}
+
 export function topicCounts(topics = [], channelTopics = {}) {
   const counts = new Map();
   for (const topic of Object.values(channelTopics)) {

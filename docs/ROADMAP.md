@@ -3,6 +3,9 @@
 The next few days, in order. Everything here is drawn from `IDEAS.md`; the rest
 of that page stays parked until something on this one ships.
 
+Every idea is scored for value and effort in **`PRIORITY.md`**; this page is
+what that ranking says to actually do, in order.
+
 The ordering rule: **what changes the experience per hour of work**, with a bias
 toward the grain of this codebase — a pure function in `web/` with a test beside
 it is cheap, a new route in `server.py` costs a rebuild, and anything that needs
@@ -11,10 +14,10 @@ new storage or a second process is a different kind of day.
 | Day | Theme | Why it is here |
 |---|---|---|
 | ~~**0**~~ | ~~鎖門 · Close the door~~ | **Done.** Token, per-caller budget, and the forwarded-address trap that made both meaningful. |
-| **1** | 好聽啲 · Make it sound better | Four small changes in `web/`, all audible within a minute of opening the page. |
+| ~~**1**~~ | ~~好聽啲 · Make it sound better~~ | **Done.** All nine Tier 1 items, plus a voice-selection bug that scoring had pointed at backwards. |
 | **2** | 今日有咩唔同 · The delta read | The one feature that turns a re-read into news. |
 | **3** | 出街 · Get it off the laptop | A podcast feed reaches the car, the kitchen and everyone who will never install a PWA. |
-| **4** | 譚仔 · Lean into the name | Cheap, distinctive, and the spice slider is a real density control. |
+| **4** | 食晒佢 · Finish what Day 3 starts | The rest of the value-4 items, three of which ride Day 3's render pipeline. |
 
 ---
 
@@ -61,48 +64,56 @@ actually bounds a public URL is the budget, which needs no secret at all.
 
 ---
 
-## Day 1 · 好聽啲
+## Day 1 · 好聽啲 — ✅ done
 
-Four changes, none of them deeper than `web/`, all audible.
+All nine Tier 1 items, not the four that were scheduled — the value-3 five were
+each an afternoon and none of them fought the others.
 
-**1. 兩把聲 · Two-voice reading** — S
+**1. 用返瀏覽器把聲** — the item was scored on a misreading, and the real defect
+was the opposite of the one written down. `player.js` already preferred a
+browser voice; what it did *not* check was whether that voice speaks Cantonese.
+`rankVoices` admits zh-TW and plain zh so that something reads when nothing
+better exists, and merely being in the list won — so a device with only Mandarin
+voices read Cantonese aloud in Mandarin, fluently, rather than spending a round
+trip on a zh-HK server voice. `chooseVoiceId` now requires score 3.
 
-Alternate the voice per segment: HiuGaai for the anchor lines, WanLung for
-quoted material. `speech.js` already emits the segment list and already knows a
-quote when it strips one; tag each segment with a role and let `player.js`
-choose the voice from the tag.
+**2. 讀音表** — `parseLexicon` takes `寫法=讀法`, one per line, deliberately not
+regular expressions: a stray `(` should not be able to silence the lot. Reader
+rules run before the built-in table, so a correction beats a guess. Latin terms
+get word boundaries; 漢字 do not, because `\b` never matches against them and the
+rule would silently do nothing.
 
-*Done when* a digest with quotes reads back in two voices, and a browser voice
-that cannot switch falls back to one without breaking.
+**3. 訊源死咗要出聲** — `darkFeeds` finds feeds that went quiet *without* going
+wrong. `feedHealth` only ever knew about `ok: false`; a feed that last succeeded
+two days ago is `ok: true` and invisible, and that is the failure that matters,
+because the digests simply stop mentioning it and silence reads as "nothing
+happened".
 
-**2. 讀音表 · Pronunciation lexicon** — S
+**4. 預熱** — the first two segments of the next unheard clip, fetched when
+upstream lands. Two bugs found by running it rather than by reading it: the
+first version walked `state.onScreen`, which holds id *strings*, so it was a
+silent no-op; the second borrowed `player.backend`, which does not exist until
+something has played — precisely the case pre-warming is for. It builds its own
+backend now, and does nothing at all on a browser voice, which synthesises
+locally.
 
-A small JSON map applied in the speech layer, in the same place citations are
-dropped — so the printed sentence and the spoken one stay two views of one
-string. Seed it with the tickers and acronyms that currently come out as noise.
+**5. 兩把聲** — `tagQuotes` carries quote depth *across* the sentence split, so
+the second half of a quotation still knows what it is. A piece counts as a quote
+when most of it is inside one, not merely when it touches one.
 
-*Done when* `NVDA` reads as letters, a unit test covers the substitution, and
-the `[12]` on screen is still a link.
+**6. 每個類別記住把聲** — changing the picker while a topic is open sets it for
+that topic, which is nearly always what was meant.
 
-**3. 每個類別記住把聲** — S
+**7. 訊源分佈** — a share bar behind each channel in the rail, measured in
+characters of summary. On the live feed, Hacker News writes 54% of Technology
+and Guardian Technology 4%.
 
-Voice and rate stored per topic, restored when you land on that filter. The
-filter is already in the URL; this is a small map in `localStorage` keyed the
-same way.
+**8. Boredom signal** — three stops in a row on one topic, and the app offers to
+skip it in auto-play. Finishing anything clears the streak. It only ever offers.
 
-*Done when* finance opens at 1.3× WanLung and transcripts at 0.95× HiuMaan,
-without touching the picker.
-
-**4. 預熱 · Pre-warm the cache** — S
-
-The page already arms a timer for `next_check_at` + 45s. When that fires and
-upstream has something new, quietly fetch the first two segments of the top
-digest so the first ▶ is instant.
-
-*Done when* the first press after an upstream refresh starts without the
-two-second stall — and when nothing is fetched if the tab is hidden.
-
----
+**9. Archive export** — `/api/archive.tar.gz`, every archived day in one gzipped
+tar. The archive is the only thing here upstream does not also have, so being
+able to walk away with it matters more than anything built on top of it.
 
 ## Day 2 · 今日有咩唔同
 
@@ -164,43 +175,64 @@ budget a courtesy rather than a defence.
 *Done when* a browser with no Cantonese voice reads aloud without `/api/tts`
 being touched at all.
 
-**3. `/api/stream.mp3`** — M · *only if Day 3 has room*
+**3. `/api/stream.mp3`** — M · *value 4* · *if the day has room*
 
 The unheard queue, concatenated on the fly. Anything that can open a URL — a
 Sonos, a car, a dumb speaker — becomes a client. Shares the concatenation code
-with the podcast, which is why it goes the same day or not at all.
+with the podcast, which is why it belongs beside it; if it slips, it slips to
+the front of Day 4 rather than into the parked list.
 
 ---
 
-## Day 4 · 譚仔
+## Day 4 · 食晒佢
 
-Cheap, distinctive, and one of them is a real feature wearing a joke.
+The 譚仔 day is gone — the noodle-shop metaphor was a costume on features that
+did not need one, and the whole group is out of `IDEAS.md`. What replaces it is
+the rest of Tier 3, chosen because three of the four ride the nightly render
+Day 3 has just built.
 
-**1. 辣度** — M
+**1. 早晨 / 夜晚簡報** — M · *value 4*
 
-A spice slider from 小辣 to 十小辣: headlines only at one end, everything with
-citations read aloud at the other. It is a content-density control that needs no
-explaining, and it composes with the delta read from Day 2 — 小辣 plus 只讀新嘢
-is a sixty-second morning.
+A four-minute cut at 07:30 and a ten-minute one at 22:00, assembled from what
+you have **not** heard rather than from what is newest. Day 3's render pass
+already walks the segments and concatenates them; this picks a different set and
+stops at a length.
 
-**2. 麵種** — S
+The distinction is the whole point: "newest" is what every feed gives you, and
+it re-reads things you sat through yesterday. `listened.js` knows better.
 
-Presets bundling topic filter, voice, speed and 辣度. 「今日嗌米線」 = your usual.
-One button, one URL hash.
+*Done when* 07:30 produces a four-minute file that contains nothing you have
+already finished, and says so when there is not four minutes of new material.
 
-**3. 個碗會裝滿** — S
+**2. 提要之提要 · The weekly** — M · *value 4*
 
-`icon.svg` is generated from geometry and `tools/make_icons.py` redraws it. Let
-the bowl fill as the day's queue is worked through, and steam when something
-lands unheard — the flag for new arrivals already exists, this gives it a face.
+A weekly and a monthly super-digest built from the archive rather than from
+upstream — which can only be done here, because upstream keeps three days and
+you keep everything.
 
-**4. 譚仔收據** — S
+This is the catch-up after a week away, and it is the second feature after the
+delta read to treat the archive as an asset rather than a backup.
 
-End of day, a receipt: what you listened to, itemised, minutes as prices, a fake
-total at the bottom. Printable. Sillier and more memorable than a stats page,
-and it is just a render over `listened.js`.
+*Done when* a Sunday file summarises the week in under ten minutes, drawn from
+`data/archive/` with no upstream call at all.
 
----
+**3. Offline pack** — M · *value 4*
+
+「下載今日」 bakes the day's segments into Cache Storage so the PWA works with no
+signal. The MTR is the case, and it is the one place the podcast feed does not
+already cover — Apple Podcasts downloads for you, a home-screen PWA does not.
+
+*Done when* aeroplane mode still reads the day, and the rail says how much is
+held.
+
+**4. Code-switch detection** — M · *value 4* · *if the day has room*
+
+Route English spans to an English voice mid-sentence instead of letting a zh-HK
+voice mangle them. It splits a segment, which the highlighting already handles —
+one sentence becoming several spans is the citation case from day one.
+
+Every finance digest is full of tickers and English company names, so this is
+the last of the value-4 items and not the least of them.
 
 ## Parked
 
