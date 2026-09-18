@@ -43,7 +43,36 @@ tailscale funnel --bg 8082                                # public internet
 Funnel publishes the page to anyone with the URL, and `/api/tts` along with it;
 there is no authentication in front of either.
 
-To keep it running:
+## Docker
+
+```sh
+docker compose up -d          # http://127.0.0.1:8082/
+```
+
+The image carries `server.py`, `web/` and `edge-tts`, and nothing else — no
+tests, no docs, no virtualenv. It runs as a non-root user and answers a
+healthcheck on `/api/health`.
+
+Point it at a different upstream without rebuilding:
+
+```yaml
+environment:
+  TAMCHAI_BASE_URL: "http://elsewhere:8081"
+```
+
+`config.json` binds to loopback, which is right on a laptop and useless in a
+container — so the image sets `TAMCHAI_HOST=0.0.0.0` and compose publishes the
+port back onto `127.0.0.1` only. Put `tailscale serve`/`funnel` in front of
+that rather than opening the port to the LAN.
+
+The day archive lives in the `tamchai-data` volume and survives the container
+being replaced; it is the only state the app has.
+
+**A tailnet upstream works from inside the container** — Docker Desktop resolves
+MagicDNS names and routes to the tailnet through the host, so
+`sesame.tailb2a681.ts.net:8081` is reachable with no extra networking.
+
+To keep it running without Docker:
 
 ```sh
 cp tamchainews.service ~/.config/systemd/user/
@@ -193,6 +222,8 @@ when you return to a tab that was left open past that time.
 ## Layout
 
 ```
+Dockerfile            the image: python:3.13-slim + edge-tts, non-root
+docker-compose.yml    the stack: loopback port, archive volume, base_url
 config.json           base_url and the rest of the knobs
 server.py             sidecar: upstream proxy + per-query cache + archive + on-demand TTS
 web/feed.js           upstream JSON → view models, routing (pure, unit-tested)
