@@ -23,9 +23,15 @@ new storage or a second process is a different kind of day.
 **Auth and a rate limit on `/api/tts`.** — S
 
 `tailscale funnel` publishes the page and the synthesiser together, and the
-README says plainly that there is no authentication in front of either. A
-stranger with the URL has a free Cantonese TTS farm that bills its outbound
-traffic to this box.
+README says plainly that there is no authentication in front of either.
+
+`/api/tts` is a **proxy, not a synthesiser** — `edge-tts` reaches Edge's Read
+Aloud websocket at `speech.platform.bing.com`, carrying a hardcoded trusted
+client token and a `Sec-MS-GEC` header its `drm.py` computes from clock skew.
+It is a reverse-engineered consumer endpoint, not a documented API. So the cost
+of leaving it open is not bandwidth: it is that somebody else's abuse gets **this
+box's IP** rate-limited or blocked by Microsoft, with nobody to appeal to. 朗讀
+would simply stop working one morning.
 
 - A shared token in `config.json`, sent as a header or a query key, checked in `_api_tts`.
 - A per-IP token bucket — a dict and a timestamp, nothing more.
@@ -176,7 +182,7 @@ and any one of them would eat all four days.
 | Ask the digest | Wants a model in the loop and a grounding story for citations. |
 | AI 主播對談 | Wants Day 3's audio pipeline finished first. |
 | Cross-device resume | Wants accounts, which this app has deliberately never had. |
-| Local Piper / Kokoro | Wants a second process and a model file in the image. |
+| Local Piper / Kokoro | Wants a second process and a model file in the image — but it is the only entry here that makes the server path actually local, and the only insurance against Microsoft closing the door. |
 
 ## 記住
 
