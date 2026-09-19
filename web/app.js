@@ -7,10 +7,11 @@
 
 import { prepare, estimateSeconds, parseLexicon, setUserLexicon } from './speech.js';
 import {
-  Player, WebSpeechBackend, ServerTtsBackend,
+  Player, WebSpeechBackend, ServerTtsBackend, AzureTtsBackend,
   loadVoices, rankVoices, installVoiceHint, speechStopsInBackground, clips,
   setTtsToken, chooseVoiceId,
 } from './player.js';
+import { AzureAccess, AZURE_VOICES, isRegion } from './azure.js';
 import {
   shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts, recentlyAdded,
   darkFeeds, darkSummary, channelShare,
@@ -45,6 +46,8 @@ const els = {
   ttsTokenButton: $('tts-token'),
   lexicon: $('lexicon'), lexiconNote: $('lexicon-note'), exportArchive: $('export-archive'),
   copyPodcast: $('copy-podcast'), podcastNote: $('podcast-note'),
+  azureKey: $('azure-key'), azureRegion: $('azure-region'), azureNote: $('azure-note'),
+  azureSave: $('azure-save'), azureTest: $('azure-test'), azureForget: $('azure-forget'),
   prev: $('prev'), toggle: $('toggle'), next: $('next'), stop: $('stop'),
   progress: $('progress'), progressLabel: $('progress-label'),
 };
@@ -57,6 +60,7 @@ const state = {
   config: null,
   voices: [],
   serverVoices: [],
+  azure: null,          // AzureAccess, when a key is held here or by the box
   activeSource: null,   // the element whose text is currently loaded in the player
   activeId: '',         // ...and its listened-to key
   activeText: '',       // the text behind it, so a checkpoint can replay it
@@ -83,6 +87,10 @@ const settings = {
   // shortening somebody's morning without being asked is not an upgrade.
   cut: isCut(localStorage.getItem('tamchai.cut')) ? localStorage.getItem('tamchai.cut') : 'full',
   skipOutlook: localStorage.getItem('tamchai.skipOutlook') === '1',
+  // This browser's own Azure credentials, if it has been given any. They stay
+  // here: nothing sends them to the box, and the box never asks.
+  azureKey: localStorage.getItem('tamchai.azure-key') || '',
+  azureRegion: localStorage.getItem('tamchai.azure-region') || '',
   // Per topic, and per topic only: a global default already exists above.
   topicPrefs: readJson('tamchai.topicPrefs', {}),
   skips: readJson('tamchai.skips', {}),
@@ -284,6 +292,15 @@ function quoteVoiceFor(voiceId) {
 
 function chooseBackend(voiceId = settings.voiceId) {
   const id = voiceId;
+  if (id.startsWith('azure:') && state.azure) {
+    const azureId = id.slice('azure:'.length);
+    const voice = AZURE_VOICES.find((v) => v.id === azureId);
+    if (voice) {
+      const other = AZURE_VOICES.find((v) => v.id !== voice.id);
+      return new AzureTtsBackend(state.azure, voice.id, voice.name,
+                                 { quoteVoiceId: other ? other.id : '' });
+    }
+  }
   if (id.startsWith('server:')) {
     const voiceId = id.slice('server:'.length);
     const voice = state.serverVoices.find((v) => v.id === voiceId);
@@ -1492,6 +1509,7 @@ function updateProgress(index) {
 async function setupVoices() {
   state.voices = await loadVoices();
   state.serverVoices = state.config?.tts_voices || [];
+  state.azure = AzureAccess.fromSettings(settings, Boolean(state.config?.azure));
 
   els.voiceSelect.replaceChildren();
   const ranked = rankVoices(state.voices);
@@ -1516,6 +1534,20 @@ async function setupVoices() {
     for (const voice of state.serverVoices) {
       const option = document.createElement('option');
       option.value = `server:${voice.id}`;
+      option.textContent = voice.name;
+      group.appendChild(option);
+    }
+    els.voiceSelect.appendChild(group);
+  }
+  // Azure is never chosen for you: it is somebody's account, and which account
+  // is a question only the person at the keyboard can answer. It appears in the
+  // list once there is a key to use, and picking it is the whole opt-in.
+  if (state.azure) {
+    const group = document.createElement('optgroup');
+    group.label = state.azure.mode === 'key' ? 'Azure（呢部機嘅 key）' : 'Azure（伺服器）';
+    for (const voice of AZURE_VOICES) {
+      const option = document.createElement('option');
+      option.value = `azure:${voice.id}`;
       option.textContent = voice.name;
       group.appendChild(option);
     }
@@ -1754,6 +1786,94 @@ els.copyPodcast.addEventListener('click', async () => {
   }
 });
 
+// ------------------------------------------------------------- Azure 語音
+
+/**
+ * This browser's own Azure credentials.
+ *
+ * They are stored here and nowhere else: the box is never told, and `/api/`
+ * never carries them. That is the point of the option — one device can spend an
+ * Azure account while another goes on using the server voice — but it does mean
+ * a *billable* key is sitting in this origin's storage, where anything that can
+ * run script on this page can read it. Worth choosing on purpose, and worth
+ * rotating in the Azure portal rather than trusting 清除 to have been enough.
+ */
+function azureNote(message, kind = '') {
+  els.azureNote.textContent = message;
+  els.azureNote.className = `rail-note${kind ? ` ${kind}` : ''}`;
+  els.azureNote.hidden = !message;
+}
+
+function describeAzure() {
+  els.azureRegion.value = settings.azureRegion;
+  els.azureKey.value = settings.azureKey ? '••••••••' : '';
+  els.azureForget.hidden = !settings.azureKey;
+  if (settings.azureKey) azureNote(`用緊呢部機嘅 key（${settings.azureRegion}）。`, 'ok');
+  else if (state.config?.azure) azureNote('個伺服器已經有 key，可以直接揀 Azure 語音。');
+  else azureNote('');
+}
+
+els.azureSave.addEventListener('click', async () => {
+  const region = els.azureRegion.value.trim();
+  // The key box shows dots for a stored key, so an untouched box means "keep
+  // what is there" rather than "set the key to a row of bullets".
+  const typed = els.azureKey.value.trim();
+  const key = typed && !/^•+$/.test(typed) ? typed : settings.azureKey;
+  if (!key) return azureNote('要填 subscription key。', 'error');
+  if (!isRegion(region)) return azureNote('region 格式唔啱，例如 eastasia。', 'error');
+  settings.azureKey = key;
+  settings.azureRegion = region;
+  try {
+    localStorage.setItem('tamchai.azure-key', key);
+    localStorage.setItem('tamchai.azure-region', region);
+  } catch { /* private window: this session only */ }
+  await setupVoices();
+  describeAzure();
+});
+
+els.azureForget.addEventListener('click', async () => {
+  settings.azureKey = '';
+  settings.azureRegion = '';
+  try {
+    localStorage.removeItem('tamchai.azure-key');
+    localStorage.removeItem('tamchai.azure-region');
+  } catch { /* nothing to remove */ }
+  if (settings.voiceId.startsWith('azure:')) {
+    settings.voiceId = '';
+    localStorage.removeItem('tamchai.voice');
+  }
+  await setupVoices();
+  describeAzure();
+  azureNote('已經清除。記住去 Azure portal rotate 返個 key。');
+});
+
+/**
+ * Synthesise one word and say exactly what happened.
+ *
+ * Whether Azure answers a browser directly is the one thing about this that
+ * cannot be checked without a key — a CORS refusal reaches script as an opaque
+ * `TypeError`, identical to the network being down. So this exists to turn that
+ * unknown into a sentence, in the one place someone holding a key can resolve
+ * it in ten seconds.
+ */
+els.azureTest.addEventListener('click', async () => {
+  const region = els.azureRegion.value.trim();
+  const typed = els.azureKey.value.trim();
+  const key = typed && !/^•+$/.test(typed) ? typed : settings.azureKey;
+  const access = key && isRegion(region)
+    ? new AzureAccess({ mode: 'key', key, region })
+    : (state.config?.azure ? new AzureAccess({ mode: 'server' }) : null);
+  if (!access) return azureNote('未有 key 可以試。', 'error');
+  azureNote('測試緊…');
+  const started = Date.now();
+  try {
+    const audio = await access.speak('測試', { voice: AZURE_VOICES[0].id, rate: 1 });
+    azureNote(`成功：${Math.round(audio.byteLength / 1024)} KB，${Date.now() - started} ms。`, 'ok');
+  } catch (error) {
+    azureNote(`失敗：${error.message}`, 'error');
+  }
+});
+
 /**
  * Say when a source has gone quiet without going wrong.
  *
@@ -1945,6 +2065,7 @@ document.addEventListener('keydown', (event) => {
   els.exportArchive.hidden = !state.config.archive;
   els.copyPodcast.hidden = !state.config.podcast;
   if (state.config.podcast) describePodcast();
+  describeAzure();
   await setupVoices();
   if (!location.hash) location.hash = buildRoute({ view: 'digests' });
   state.route = parseRoute(location.hash);

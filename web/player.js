@@ -280,6 +280,120 @@ export class ServerTtsBackend {
   }
 }
 
+/**
+ * Azure Speech, fetched here and played from memory.
+ *
+ * The one structural difference from `ServerTtsBackend`: an `<audio src>` can
+ * carry no headers, and Azure wants a token or a key on every request — so the
+ * bytes are fetched first and played from a blob URL. That costs a copy in
+ * memory and buys the topology Day 0 wanted: synthesis metered against an
+ * account that can be rotated, instead of this box's standing with an endpoint
+ * that has no account behind it at all.
+ *
+ * The clip pair is still what plays them, because iOS grants playback per
+ * element and only from a real tap — that is true whoever made the audio.
+ */
+export class AzureTtsBackend {
+  constructor(access, voiceId, label, { quoteVoiceId = '' } = {}) {
+    this.access = access;
+    this.voiceId = voiceId;
+    this.quoteVoiceId = quoteVoiceId;
+    this.id = `azure:${voiceId}`;
+    this.label = label;
+    this.background = true;          // an <audio> element survives a locked screen
+    this._urls = new Map();          // segment key -> blob URL, so a seek back is free
+  }
+
+  voiceFor(segment) {
+    return (this.quoteVoiceId && segment?.role === 'quote') ? this.quoteVoiceId : this.voiceId;
+  }
+
+  _key(segment, rate) {
+    return `${this.voiceFor(segment)}|${rate}|${segment.speak}`;
+  }
+
+  async _clipUrl(segment, rate) {
+    const key = this._key(segment, rate);
+    const known = this._urls.get(key);
+    if (known) return known;
+    const audio = await this.access.speak(segment.speak, { voice: this.voiceFor(segment), rate });
+    const url = URL.createObjectURL(new Blob([audio], { type: 'audio/mpeg' }));
+    // Bounded, and the oldest goes first: a day is ~100 clips and each is its
+    // own object in memory until revoked.
+    if (this._urls.size > 24) {
+      const [oldest, oldUrl] = this._urls.entries().next().value;
+      URL.revokeObjectURL(oldUrl);
+      this._urls.delete(oldest);
+    }
+    this._urls.set(key, url);
+    return url;
+  }
+
+  async speak(segment, { rate }) {
+    const url = await this._clipUrl(segment, rate);
+    if (clips.spare.clip === url) clips.swap();
+    const audio = clips.current;
+    await new Promise((resolve, reject) => {
+      const cleanup = () => { audio.onended = null; audio.onerror = null; };
+      audio.onended = () => { cleanup(); resolve(); };
+      audio.onerror = () => {
+        cleanup();
+        if (!audio.src || audio.src.endsWith('#cancelled')) resolve();
+        else reject(new Error('Azure 語音播放失敗'));
+      };
+      if (audio.clip !== url) {
+        audio.clip = url;
+        audio.src = url;
+      } else if (audio.currentTime) {
+        try { audio.currentTime = 0; } catch { /* not seekable yet */ }
+      }
+      audio.play().catch(reject);
+    });
+  }
+
+  prefetch(segment, { rate }) {
+    if (!segment) return;
+    // Fetched, not merely parked: the point of the lookahead is that the bytes
+    // are local before a screen goes dark, and a failure here is not the
+    // listener's problem — the next speak() will surface it.
+    this._clipUrl(segment, rate).then((url) => {
+      const spare = clips.spare;
+      if (spare.clip === url) return;
+      spare.onended = null;
+      spare.onerror = null;
+      spare.clip = url;
+      spare.src = url;
+      spare.load();
+    }).catch(() => {});
+  }
+
+  cancel() {
+    for (const audio of clips.all) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.clip = null;
+      audio.load();
+    }
+  }
+
+  pause() {
+    clips.current.pause();
+    return true;
+  }
+
+  resume() {
+    clips.current.play().catch(() => {});
+  }
+
+  dispose() {
+    this.cancel();
+    for (const url of this._urls.values()) URL.revokeObjectURL(url);
+    this._urls.clear();
+  }
+}
+
 export class Player {
   constructor({ onSegment, onStatus, onFinish, onError } = {}) {
     this.segments = [];

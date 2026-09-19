@@ -16,7 +16,7 @@ new storage or a second process is a different kind of day.
 | ~~**0**~~ | ~~鎖門 · Close the door~~ | **Done.** Token, per-caller budget, and the forwarded-address trap that made both meaningful. |
 | ~~**1**~~ | ~~好聽啲 · Make it sound better~~ | **Done.** All nine Tier 1 items, plus a voice-selection bug that scoring had pointed at backwards. |
 | ~~**2**~~ | ~~今日有咩唔同~~ → 讀幾多 · Three lengths | **Done.** The delta read died on real data; the digest's own lead turns twelve minutes into one. |
-| ~~**3**~~ | ~~出街~~ · The podcast feed | **Done** (the feed). Azure client-direct still wants a key; stream.mp3 slips to Day 4. |
+| ~~**3**~~ | ~~出街 · Get it off the laptop~~ | **Done.** The podcast feed, and Azure client-direct with the key held wherever you want it. stream.mp3 slips to Day 4. |
 | **4** | 食晒佢 · Finish what Day 3 starts | The rest of the value-4 items, three of which ride Day 3's render pipeline. |
 
 ---
@@ -247,20 +247,43 @@ of rendered audio, and a test pins it to a real recording.
 Podcasting 2.0 JSON, so chapter marks work in Pocket Casts and not in Apple's
 client. Writing ID3 CHAP frames is a contained job for another day.
 
-**2. Azure Speech, client-direct** — M · *the server half is already in*
+**2. Azure Speech, client-direct** — ✅ done
 
-`/api/speech-token` exists and mints a ten-minute token; what is left is the
-browser half — a third back-end in `player.js` beside `WebSpeechBackend` and
-`ServerTtsBackend`, talking to Azure itself. Needs a real key and region to
-build against, because whether the REST endpoint answers a browser directly or
-wants the Speech SDK is not something worth guessing at.
+`/api/speech-token` had been waiting for a browser half since Day 0. It has one:
+`AzureTtsBackend` in `player.js`, fed by `AzureAccess` in `web/azure.js`.
 
-This is the topology that was asked for and edge-tts cannot express: abuse
-spends the token's own quota, not this box's standing. It also makes the Day 0
-budget a courtesy rather than a defence.
+**The unknown that had been blocking it is answered, and it did not need a key.**
+Whether the REST endpoint answers a browser at all, or wants the Speech SDK, was
+written here as not worth guessing at — so it was measured instead. A `POST` to
+`https://eastasia.tts.speech.microsoft.com/cognitiveservices/v1` carrying
+`Ocp-Apim-Subscription-Key` and `X-Microsoft-OutputFormat` clears its CORS
+preflight and returns a response script can read: the live service answered
+**401** to a deliberately wrong key rather than refusing the origin. A readable
+401 is the whole answer — the preflight passed and the response carried
+`Access-Control-Allow-Origin`. **No Speech SDK.**
 
-*Done when* a browser with no Cantonese voice reads aloud without `/api/tts`
-being touched at all.
+**Two places to keep the key, because they are different trades.** The box can
+hold it (`azure_key` in config.json, `/api/speech-token` mints a ten-minute
+token, the key never leaves) or this browser can (the rail's Azure 語音 section,
+localStorage, its own quota, nothing configured on the box). In browser mode the
+key goes on the request directly: a token exists to avoid exposing the key,
+which buys nothing once the browser is the thing holding it.
+
+Said plainly in the README rather than buried: a subscription key is a
+**billable** credential, and a page's storage is a weaker place for it than the
+box's config — anything that can run script on this origin can read it, and
+unlike a token it does not expire.
+
+**Azure never becomes the voice on its own.** It appears in the 語音 picker once
+there is a key to use, and choosing it is the whole opt-in — so one install can
+read through the browser's voice on one device, this box's edge-tts on another,
+and an Azure account on a third.
+
+**測試** synthesises one word and reports exactly what came back, because a
+browser hands script an opaque `TypeError` for a blocked cross-origin request
+and that is indistinguishable from the network being down. A refused key, a
+refused token, a CORS problem and a plain HTTP status are four different
+sentences.
 
 **3. `/api/stream.mp3`** — M · *value 4* · *if the day has room*
 

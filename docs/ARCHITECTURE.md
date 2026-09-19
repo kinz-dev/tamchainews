@@ -108,9 +108,25 @@ not on the sesame box — so the reader is available to any tailnet device while
   inside it, and fails closed — an unrecognised variant means the toggle is absent, never
   that a news section is skipped.
 
+**`azure.js`** — Azure Speech spoken to by the browser (pure, unit-testable)
+- `ssmlFor(text, {voice, rate})` escapes the prose into an SSML envelope; `ratePercent`
+  turns 1.25 into `+25%`. An unescaped `&` is a 400 from Azure, which reads on a page
+  reading itself aloud as one sentence in a hundred silently failing.
+- `AzureAccess` answers *where to send* and *what to send with it* in two modes: `server`
+  (ask `/api/speech-token` for a ten-minute token, renewed a minute early) or `key` (this
+  browser holds the subscription key and sends it directly — a token would protect nothing
+  once the browser is the thing holding the key).
+- The REST endpoint answers a cross-origin `POST`, verified against the live service, so no
+  Speech SDK is needed. Failures are told apart by hand because a browser reports a CORS
+  refusal as an opaque `TypeError`.
+
 **`player.js`** — playback engine behind one interface
 `play(fromSegment) / pause() / resume() / stop() / next() / prev() / seekTo(i)`, emitting
 `onSegmentStart / onEnd / onError`. Two swappable back-ends:
+- `AzureTtsBackend` — fetches the bytes and plays them from a blob URL, because an
+  `<audio src>` can carry no `Authorization` header. Bounded cache of object URLs, revoked
+  on dispose; still plays through the shared clip pair, since iOS grants playback per
+  element whoever made the audio.
 - `WebSpeechBackend` — one `SpeechSynthesisUtterance` per segment, queue of 2 kept warm
   (Chrome truncates long utterances and drops the queue on pause; per-segment avoids both).
   Voice selection: `zh-HK` → `yue` → `zh-TW` → `zh-*`, ranked, user-overridable. Within a
