@@ -85,6 +85,17 @@ not on the sesame box — so the reader is available to any tailnet device while
 - Output: `[{id, kind: heading|para|bullet, text, speak, charStart, charEnd}]` — `charStart/End`
   anchor the on-screen highlight.
 
+**`cut.js`** — one day at three lengths (pure, unit-testable)
+- `planCut(blocks, {cut, skipOutlook})` → the pieces to render, the queue to play, and a
+  count of what was left out. `快讀` is the 標題 and the 【本報訊】 lead — everything above the
+  first sub-heading; `提要` adds every heading and the first sentence under it; `全文` is
+  everything.
+- Cuts the digest's own structure rather than comparing days: upstream regenerates the daily
+  summary each morning, so there is no diff to take (`ROADMAP.md`, Day 2).
+- The outlook tail is found by the heading's whole title, not by the phrase 「市場情緒」
+  inside it, and fails closed — an unrecognised variant means the toggle is absent, never
+  that a news section is skipped.
+
 **`player.js`** — playback engine behind one interface
 `play(fromSegment) / pause() / resume() / stop() / next() / prev() / seekTo(i)`, emitting
 `onSegmentStart / onEnd / onError`. Two swappable back-ends:

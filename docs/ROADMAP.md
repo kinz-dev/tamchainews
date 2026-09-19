@@ -15,7 +15,7 @@ new storage or a second process is a different kind of day.
 |---|---|---|
 | ~~**0**~~ | ~~鎖門 · Close the door~~ | **Done.** Token, per-caller budget, and the forwarded-address trap that made both meaningful. |
 | ~~**1**~~ | ~~好聽啲 · Make it sound better~~ | **Done.** All nine Tier 1 items, plus a voice-selection bug that scoring had pointed at backwards. |
-| **2** | 今日有咩唔同 · The delta read | The one feature that turns a re-read into news. |
+| ~~**2**~~ | ~~今日有咩唔同~~ → 讀幾多 · Three lengths | **Done.** The delta read died on real data; the digest's own lead turns twelve minutes into one. |
 | **3** | 出街 · Get it off the laptop | A podcast feed reaches the car, the kitchen and everyone who will never install a PWA. |
 | **4** | 食晒佢 · Finish what Day 3 starts | The rest of the value-4 items, three of which ride Day 3's render pipeline. |
 
@@ -115,32 +115,78 @@ skip it in auto-play. Finishing anything clears the streak. It only ever offers.
 tar. The archive is the only thing here upstream does not also have, so being
 able to walk away with it matters more than anything built on top of it.
 
-## Day 2 · 今日有咩唔同
+## Day 2 · 讀幾多 — ✅ done
 
-**The delta read.** — M · *the one to get right*
+**Three lengths of the same day.** — S · *arrived at from the other side*
 
-Diff today's channel summary against yesterday's on the same topic, and read
-only what moved. Today the app re-reads a mostly-unchanged summary and calls it
-news; this makes the difference the content.
+The day was scheduled as **今日有咩唔同**, the delta read: diff today's summary
+against yesterday's and read only what moved. That turned out to rest on an
+assumption the archive disproves, and the warning written into this page is what
+caught it — *the test suite needs a fixture from two real consecutive archive
+days, not a synthetic one.* Given real days, it does not survive.
 
-The archive under `data/archive/` already holds yesterday. The diff is
-sentence-level over the segment list `speech.js` produces, which means it is a
-pure function with a test beside it — the same shape as `feed.js` and
-`listened.js`. **No model needed for v1**; similarity over sentences is enough
-to tell a reworded line from a new one.
+**Upstream regenerates the daily summary every morning; it does not edit it.**
+Two consecutive days share almost no wording even where they cover the same
+story, so there is nothing to subtract. Measured over four archived days, three
+ways:
 
-- `web/delta.js` — `delta(todaySegments, yesterdaySegments) → [{segment, state}]`, `state` ∈ `new | changed | same`.
-- A per-block toggle 「只讀新嘢」, and a 🆕 badge on blocks that actually moved.
-- Unchanged blocks collapse to a line: 「同尋日一樣」.
-- Auto-play in delta mode skips a block whose every sentence is `same`.
+| method | result |
+|---|---|
+| sentence similarity, the v1 written above | 65 of 74 sentences come back `new` |
+| IDF-weighted block matching | cuts **2–4%** of the runtime |
+| rare-term novelty against yesterday's whole text | cuts **0–2%** |
 
-**Done when** a day with three genuinely new stories reads back in under two
-minutes instead of eleven, and a day with nothing new says so out loud and stops.
+What little does match is the 市場情緒展望 scaffolding — 「信心水平：中」 and the
+like — because the short repeated lines are the only repeated lines. A paragraph
+retelling yesterday's Fed decision in fresh words scores **0.20**, *below* a
+genuinely new paragraph at 0.51. There is no threshold in there because there is
+no signal to threshold, and shipping one would have been a 🆕 badge that lit up
+at random. The idea is struck from `IDEAS.md`; the version that would work wants
+story clustering or a model, which is 時間線, already parked.
 
-**Watch for:** the boundary case where upstream rewrites the whole summary
-without changing its meaning. If everything comes back `changed`, the feature is
-worthless — so the test suite needs a fixture from two real consecutive archive
-days, not a synthetic one.
+The same measurements found the two minutes somewhere else. **The digest already
+contains its own short version, written by upstream, every day:**
+
+| | 09-14 | 09-15 | 09-16 | 09-17 | 09-18 |
+|---|---|---|---|---|---|
+| 全文 | 12:42 | 10:39 | 11:48 | 10:52 | 13:54 |
+| 提要 | 2:26 | 2:48 | 2:50 | 2:19 | 2:49 |
+| 快讀 | **1:18** | **1:15** | **1:02** | **1:15** | **1:25** |
+
+So the twelve minutes become one by structure rather than by comparison — which
+also works on a day with no yesterday, and has nothing in it to drift.
+
+Shipped, in `web/cut.js`:
+
+- **快讀** — the 標題 and the 【本報訊】 lead, which is upstream's own summary of
+  the whole day. Everything above the first sub-heading; a digest with no
+  sub-headings has no lead to separate, and reads in full rather than empty.
+- **提要** — that, plus every heading and the first sentence under each.
+- **全文** — the read the app always had.
+- **略過市場情緒展望**, priced at 1:33–2:43. Its *shape* repeats daily — four
+  markets, each with 方向 / 驅動因素 / 風險 / 信心水平 — but its numbers do change,
+  so it is offered and costed rather than taken away.
+- Every skipped run says how many sentences it was and opens on a tap. A
+  shortened read that hides its own edges is one you cannot trust to have told
+  you everything.
+
+**The bit that only running it found:** matching the outlook heading on 「市場情緒」
+skipped the wrong section entirely on the very first live day. 2026-09-18 leads
+with 「全球宏觀經濟：聯儲局與日銀同步緊縮，**市場情緒**兩極」 — the words are there,
+describing the news rather than naming a section of outlook, and fifteen
+sentences of actual news went quietly missing. It now matches the heading's whole
+title, and fails closed: an unrecognised variant costs two minutes of listening,
+where the other way round loses the news.
+
+**Also:** a position is an index into a particular queue, and one day now has
+three of different lengths under one id. `resumePoint` takes the queue length and
+drops a position recorded against another — sentence 40 of the full read is not a
+shorter way of saying sentence 40 of the 快讀, it is off the end of it.
+
+**What it is not.** The default is still 全文: nobody's morning gets quietly cut
+to a minute, so the feature is invisible until the banner mentions it once.
+Finishing 快讀 marks the day heard — you chose that length, and the day card
+saying otherwise would be arguing with you.
 
 ---
 

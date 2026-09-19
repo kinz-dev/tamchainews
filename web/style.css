@@ -558,3 +558,38 @@ details.refs-box > summary:hover { color: var(--accent); }
   .digest-stats { width: 100%; margin-left: 0; }
   .progress-label { display: none; }
 }
+
+/* --------------------------------------------------------------- 讀幾多 */
+
+.cut-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 0 0 14px; }
+.cut-pick { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.cut-pick .cut {
+  display: flex; flex-direction: column; gap: 1px; align-items: center;
+  padding: 6px 14px; cursor: pointer;
+  background: var(--bg-raised); border: 0; border-right: 1px solid var(--border);
+  font: inherit; color: var(--text-dim);
+}
+.cut-pick .cut:last-child { border-right: 0; }
+.cut-pick .cut:hover { color: var(--text); }
+.cut-pick .cut[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
+.cut-pick .cut .k { font-size: 13px; font-weight: 700; }
+.cut-pick .cut .t { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.cut-pick .cut[aria-pressed="true"] .t { color: var(--text-dim); }
+.cut-skip { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim); cursor: pointer; }
+
+/* What a shortened read left out: never silent about its own edges. */
+.reader-body .gap {
+  display: block; margin: 4px 0 12px; padding: 2px 8px; cursor: pointer;
+  background: none; border: 0; border-left: 2px solid var(--border);
+  font: inherit; font-size: 12px; color: var(--text-faint);
+}
+.reader-body .gap:hover { color: var(--accent); border-left-color: var(--accent); }
+.cut-end { display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+           margin-top: 18px; padding-top: 12px; border-top: 1px dashed var(--border); }
+.cut-end .line { font-size: 12px; color: var(--text-faint); }
+.cut-end .more {
+  padding: 4px 12px; cursor: pointer; border-radius: var(--radius-sm);
+  background: var(--accent-soft); border: 1px solid var(--border); font: inherit;
+  font-size: 12px; color: var(--text);
+}
+.cut-end .more:hover { border-color: var(--accent); }

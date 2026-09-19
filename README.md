@@ -127,7 +127,7 @@ has dropped, so the range filters that list rather than just fetching more.
 | | |
 |---|---|
 | **摘要** | The digest stream, grouped topic → channel → summary, with each cited article behind a fold. Filter by topic or channel from the rail; paginate through the archive. A filtered view also lists the scheduled reports that match — some topics (Transcript) have no digests at all and live entirely there. |
-| **每日總覽** | The Daily Summary reader: pick a day, follow along sentence by sentence, chain into the next day. |
+| **每日總覽** | The Daily Summary reader: pick a day, pick how much of it to read, follow along sentence by sentence, chain into the next day. |
 | **定時報告** | Scheduled prompt outputs (the finance digest and friends), rendered from Markdown. |
 | **訊源狀態** | Every feed's health, last fetch and last error. |
 
@@ -145,6 +145,37 @@ on the page corresponds to it.
 Citations are dropped in the speech layer rather than before segmentation, which
 is what keeps the printed sentence and the spoken one two views of the same
 string: `[12]` stays a link on screen and is never read aloud.
+
+### 讀幾多 · How much of a day to read
+
+A full daily summary is eleven to fourteen minutes, and most mornings that is
+more than the time there is. The reader offers three lengths of the same day,
+each priced at your current speed:
+
+| | | |
+|---|---|---|
+| **快讀** | ~1:15 | The 標題 and the 【本報訊】 lead — everything above the first sub-heading |
+| **提要** | ~2:30 | That, plus every heading and the first sentence under it |
+| **全文** | ~11:00 | The whole thing, as it always was |
+
+The lead is not a truncation: upstream writes it as a summary of the whole day,
+so 快讀 is the two-minute version of the digest that already existed and was
+never offered separately. Nothing is generated or shortened here — the cut only
+chooses which of the day's own sentences to read.
+
+**略過市場情緒展望** drops the closing outlook section, which costs another one
+to three minutes. Its shape repeats daily — four markets, each with 方向 /
+驅動因素 / 風險 / 信心水平 — while its numbers do change, so it is offered and
+priced rather than removed.
+
+Every skipped run leaves a line saying how many sentences went with it, and
+opens on a tap: a shortened read that hides its own edges is one you cannot
+trust to have told you everything. The default is 全文, and the shorter reads
+are mentioned once, in a banner, rather than applied to your morning unasked.
+
+A position is an index into a particular queue, and one day now has three of
+different lengths under one id — so a stopping point recorded against one length
+is dropped rather than translated when you resume at another.
 
 ### What you have already heard
 
@@ -369,6 +400,7 @@ server.py             sidecar: upstream proxy + per-query cache + archive + on-d
 web/feed.js           upstream JSON → view models, routing (pure, unit-tested)
 web/listened.js       listened-to state: IndexedDB + the pure state arithmetic
 web/speech.js         Markdown → speakable segments (pure, unit-tested)
+web/cut.js            one day at three lengths: 快讀 / 提要 / 全文 (pure, unit-tested)
 web/player.js         playback queue + the two voice back-ends
 web/app.js            UI wiring: router, four views, speak buttons
 web/icon.svg          the app mark — a 譚仔 bowl broadcasting
