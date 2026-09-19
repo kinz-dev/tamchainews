@@ -18,6 +18,9 @@ import {
   parseRoute, buildRoute, routeToParams, RANGES,
 } from './feed.js';
 import {
+  planCut, cutDurations, outlookSeconds, nextCut, labelOf, isCut,
+} from './cut.js';
+import {
   ListenStore, idFor, stateOf, percentOf, tally, isResumable, resumePoint, parseDailyId,
   nextPlayable, kindOf, containedBy, allContainedHeard, digestListenIds, anyUnheard,
   prefsForTopic, rememberTopicPrefs, boredTopics, noteSkip,
@@ -59,6 +62,7 @@ const state = {
   activeTitle: '',
   activeSubtitle: '',
   currentDay: null,
+  dayBlocks: [],        // the open day's blocks, before the cut takes a length off them
   segments: [],
   listens: null,        // ListenStore
   highlighted: null,    // {container, original} while a block carries sentence spans
@@ -74,6 +78,10 @@ const settings = {
   autoplayNext: localStorage.getItem('tamchai.autoplayNext') === '1',
   hideListened: localStorage.getItem('tamchai.hideListened') === '1',
   lexicon: localStorage.getItem('tamchai.lexicon') || '',
+  // How much of a day to read. Defaults to the full read the app always did:
+  // shortening somebody's morning without being asked is not an upgrade.
+  cut: isCut(localStorage.getItem('tamchai.cut')) ? localStorage.getItem('tamchai.cut') : 'full',
+  skipOutlook: localStorage.getItem('tamchai.skipOutlook') === '1',
   // Per topic, and per topic only: a global default already exists above.
   topicPrefs: readJson('tamchai.topicPrefs', {}),
   skips: readJson('tamchai.skips', {}),
@@ -556,7 +564,13 @@ function checkpoint(index = player.index) {
  * no one asked for, and resuming into sound on load would be rude anyway.
  */
 function restorePlayback(checkpointed) {
-  const { segments } = prepare(checkpointed.text);
+  const prepared = prepare(checkpointed.text);
+  // A daily checkpoint is a position in *a cut* of the day. The reader's chosen
+  // length is what the page would have queued, so rebuilding the whole day here
+  // would put the same number on a different sentence.
+  const segments = kindOf(checkpointed.id) === 'daily'
+    ? planCut(prepared.blocks, { cut: settings.cut, skipOutlook: settings.skipOutlook }).segments
+    : prepared.segments;
   if (!segments.length) return;
   endHighlighting();
 
@@ -886,6 +900,10 @@ function renderDailyView() {
   }
   els.view.appendChild(grid);
 
+  const bar = el('div', 'cut-bar');
+  bar.id = 'cut-bar';
+  els.view.appendChild(bar);
+
   const body = el('article', 'reader-body');
   body.id = 'reader-body';
   els.view.appendChild(body);
@@ -897,11 +915,12 @@ function renderDailyView() {
     || (days.some((d) => d.day === savedDay) ? savedDay : '')
     || days[0].day;
   selectDay(opening, { resume: !state.currentDay });
+  offerShorterRead();          // needs the open day's blocks to quote a real time
   hidePager();
 }
 
 /** Render one day's digest as clickable sentences, the way the reader always worked. */
-function selectDay(dayId, { autoplay = false, resume = false } = {}) {
+function selectDay(dayId, { autoplay = false, resume = false, keepText = '' } = {}) {
   endHighlighting();
   const day = (state.daily?.days || []).find((d) => d.day === dayId);
   if (!day) return;
@@ -909,12 +928,23 @@ function selectDay(dayId, { autoplay = false, resume = false } = {}) {
 
   const body = $('reader-body');
   if (!body) return;
-  const { blocks, segments } = prepare(day.text);
+  const { blocks } = prepare(day.text);
+  state.dayBlocks = blocks;
+  const plan = planCut(blocks, { cut: settings.cut, skipOutlook: settings.skipOutlook });
+  const segments = plan.segments;
   state.segments = segments;
+  renderCutBar(blocks);
   body.replaceChildren();
 
   let index = 0;
-  blocks.forEach((block) => {
+  plan.pieces.forEach((piece, at) => {
+    if (piece.type === 'gap') {
+      // A gap at the very end is the end line's business; two notices about the
+      // same missing sentences read as two different lots of missing sentences.
+      if (at < plan.pieces.length - 1) body.appendChild(gapLine(piece));
+      return;
+    }
+    const block = piece.block;
     const tag = block.kind.startsWith('h') ? block.kind : block.kind === 'li' ? 'li' : 'p';
     const node = el(tag);
     block.segments.forEach((segment) => {
@@ -930,6 +960,7 @@ function selectDay(dayId, { autoplay = false, resume = false } = {}) {
     });
     body.appendChild(node);
   });
+  if (plan.dropped.sentences) body.appendChild(cutEnd(plan));
 
   for (const card of els.view.querySelectorAll('.day-card')) {
     card.setAttribute('aria-current', String(card.dataset.listenId === idFor.daily(dayId)));
@@ -937,25 +968,151 @@ function selectDay(dayId, { autoplay = false, resume = false } = {}) {
 
   els.playerbar.hidden = false;
   els.nowTitle.textContent = day.headline || day.day;
-  els.nowSub.textContent = `${day.day} · ${day.chars} 字`;
+  els.nowSub.textContent = subtitleFor(day, plan);
   state.activeSource = null;
   state.activeId = idFor.daily(day.day);
   state.activeText = day.text;
   state.activeTitle = day.headline || day.day;
-  state.activeSubtitle = `${day.day} · ${day.chars} 字`;
+  state.activeSubtitle = els.nowSub.textContent;
 
   loadIntoPlayer(segments);
 
   // Picking a day by hand starts it; coming back to one you were part way
-  // through picks up where you stopped.
-  const at = resume
-    ? Math.min(resumePoint(state.listens.playback, state.listens.get(state.activeId), state.activeId),
-               segments.length - 1)
-    : 0;
+  // through picks up where you stopped. Changing length instead keeps the
+  // sentence being read, which is the only landmark the two queues share —
+  // and if the new length has cut that sentence away, the top is where it went.
+  const at = keepText
+    ? Math.max(0, segments.findIndex((segment) => segment.text === keepText))
+    : resume
+      ? Math.min(resumePoint(state.listens.playback, state.listens.get(state.activeId),
+                             state.activeId, { total: segments.length }),
+                 segments.length - 1)
+      : 0;
   state.resumed = resume && at > 0;
   if (autoplay) player.play(at);
   else if (at > 0) player.seek(at);
   else updateProgress(0, segments[0]);
+}
+
+/** 「2026-09-17 · 快讀 · 14/74 句」 — the day, and how much of it is queued. */
+function subtitleFor(day, plan) {
+  const whole = `${day.day} · ${day.chars} 字`;
+  if (!plan.dropped.sentences) return whole;
+  const heard = plan.segments.length;
+  return `${day.day} · ${labelOf(settings.cut)} ${heard}/${heard + plan.dropped.sentences} 句`;
+}
+
+/**
+ * The picker: three lengths of the same day, each priced at this reader's rate.
+ *
+ * Every one is planned in full to get its number rather than scaled off the
+ * whole, because the three numbers are the entire argument for the control.
+ */
+function renderCutBar(blocks) {
+  const bar = $('cut-bar');
+  if (!bar) return;
+  bar.replaceChildren();
+
+  const group = el('div', 'cut-pick');
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', '讀幾多');
+  for (const { id, label, hint, seconds } of cutDurations(blocks, {
+    rate: settings.rate, skipOutlook: settings.skipOutlook,
+  })) {
+    const button = el('button', 'cut');
+    button.type = 'button';
+    button.title = hint;
+    button.setAttribute('aria-pressed', String(settings.cut === id));
+    button.appendChild(el('span', 'k', label));
+    button.appendChild(el('span', 't', formatClock(seconds)));
+    button.addEventListener('click', () => setCut(id));
+    group.appendChild(button);
+  }
+  bar.appendChild(group);
+
+  // The outlook section is the one part whose shape repeats daily. Its numbers
+  // do change, so it is offered as a choice and priced rather than dropped.
+  const tail = outlookSeconds(blocks, settings.rate);
+  if (tail <= 0) return;
+  const label = el('label', 'cut-skip');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = settings.skipOutlook;
+  box.addEventListener('change', () => setSkipOutlook(box.checked));
+  label.appendChild(box);
+  label.appendChild(document.createTextNode(`略過市場情緒展望 (${formatClock(tail)})`));
+  bar.appendChild(label);
+}
+
+/**
+ * The line that admits what a gap swallowed.
+ *
+ * A shortened read that hides its own edges is one you cannot trust to have
+ * told you everything, so every skipped run says how many sentences it was and
+ * opens on a tap.
+ */
+function gapLine(gap) {
+  const button = el('button', 'gap', `⋯ 仲有 ${gap.sentences} 句`);
+  button.type = 'button';
+  button.title = '聽埋呢段';
+  button.addEventListener('click', openGaps);
+  return button;
+}
+
+function cutEnd(plan) {
+  const wrap = el('div', 'cut-end');
+  const next = nextCut(settings.cut);
+  wrap.appendChild(el('span', 'line', `${labelOf(settings.cut)}完 · 略過咗 ${plan.dropped.sentences} 句`));
+  const more = el('button', 'more', next ? `聽「${next.label}」` : '聽埋市場情緒展望');
+  more.type = 'button';
+  more.addEventListener('click', openGaps);
+  wrap.appendChild(more);
+  return wrap;
+}
+
+/** One step longer: a longer cut first, then the outlook it was still skipping. */
+function openGaps() {
+  const next = nextCut(settings.cut);
+  if (next) setCut(next.id);
+  else setSkipOutlook(false);
+}
+
+function setCut(id) {
+  if (!isCut(id) || id === settings.cut) return;
+  settings.cut = id;
+  localStorage.setItem('tamchai.cut', id);
+  recut();
+}
+
+function setSkipOutlook(on) {
+  settings.skipOutlook = Boolean(on);
+  localStorage.setItem('tamchai.skipOutlook', settings.skipOutlook ? '1' : '0');
+  recut();
+}
+
+/** Rebuild the open day at the new length, staying on the sentence being read. */
+function recut() {
+  if (!state.currentDay) return;
+  const playing = player.status === 'playing';
+  const keepText = state.segments[player.index]?.text || '';
+  selectDay(state.currentDay.day, { autoplay: playing, keepText });
+}
+
+const CUT_HINT_KEY = 'tamchai.cut-hint';
+
+/**
+ * Say once that the shorter reads exist.
+ *
+ * The default stays on 全文 — nobody's morning gets quietly cut to a minute —
+ * which means the feature is invisible until it is mentioned exactly once.
+ */
+function offerShorterRead() {
+  if (settings.cut !== 'full' || localStorage.getItem(CUT_HINT_KEY)) return;
+  const blocks = state.dayBlocks;
+  if (!blocks?.length) return;
+  const [quick] = cutDurations(blocks, { rate: settings.rate });
+  try { localStorage.setItem(CUT_HINT_KEY, '1'); } catch { /* private window */ }
+  showBanner(`新增：快讀 ${formatClock(quick.seconds)} — 唔使次次都聽足全文。`, false, { seconds: 10 });
 }
 
 function playAdjacentDay() {
@@ -1519,6 +1676,8 @@ els.rateSelect.addEventListener('change', () => {
   // would otherwise keep quoting the old speed's running time.
   if (player.status !== 'playing') updateProgress(player.index);
   retimeDayCards();
+  // The cut picker quotes three running times; at a new speed they are all wrong.
+  if (state.dayBlocks.length) renderCutBar(state.dayBlocks);
 });
 
 /** Keep the day cards' "約 X" in step with the speed the player is quoting. */

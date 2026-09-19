@@ -131,6 +131,22 @@ test('resumePoint ignores a checkpoint that has gone stale', () => {
   assert.equal(resumePoint(stale, undefined, 'x'), 0);
 });
 
+test('resumePoint drops a position recorded against a queue of another length', () => {
+  const cp = { id: 'daily:2026-09-16', text: '一。', segment: 40, total: 69, at: Date.now() };
+  const rec = makeRecord({ id: 'daily:2026-09-16', segment: 40, total: 69 });
+  // The same day read at 快讀 is fourteen sentences, not sixty-nine: index 40
+  // is not a shorter way of saying the same place, it is off the end of it.
+  assert.equal(resumePoint(cp, rec, 'daily:2026-09-16', { total: 14 }), 0);
+  assert.equal(resumePoint(cp, rec, 'daily:2026-09-16', { total: 69 }), 40, 'same queue, same place');
+  assert.equal(resumePoint(cp, rec, 'daily:2026-09-16'), 40, 'no length given, nothing to check against');
+});
+
+test('resumePoint still resumes a record that never stored a length', () => {
+  const rec = makeRecord({ id: 'x', segment: 9 });
+  assert.equal(rec.total, 0);
+  assert.equal(resumePoint(null, rec, 'x', { total: 14 }), 9, 'an old record is not a wrong one');
+});
+
 test('kindOf tells the granularities apart', () => {
   assert.equal(kindOf('digest:75:highlights'), 'highlights');
   assert.equal(kindOf('digest:75:topic:AI'), 'topic');

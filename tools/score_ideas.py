@@ -32,7 +32,6 @@ IDEAS = [
  ("Jingle and bed",             "廣播", "S", 1, "Pure texture"),
  ("Dream mode",                 "最野", "S", 1, "No evidence it does anything"),
 
- ("「今日有咩唔同」",             "理解", "M", 5, "12 min of re-reading becomes 2 min of news. Daily. The one."),
  ("Podcast feed",               "廣播", "M", 5, "CarPlay, offline, position sync — a whole context, for free"),
  ("早晨 / 夜晚簡報",              "廣播", "M", 4, "A fixed-length cut of what you have NOT heard"),
  ("/api/stream.mp3",            "廣播", "M", 4, "Any dumb speaker becomes a client"),
@@ -102,15 +101,18 @@ w = out.append
 w("""# 優先次序 · Priority
 
 Every idea in `IDEAS.md`, scored and ranked. `AUTH ON /api/tts` is gone from the
-list because it shipped in #8.
+list because it shipped in #8, and 「今日有咩唔同」 because it was measured against
+the archive and dropped — 讀幾多 shipped in its place. Both are written up in
+`ROADMAP.md`.
 
 **Effort** is the S/M/L/XL from `IDEAS.md`, costed `S=1, M=3, L=8, XL=20`, and it
 is the half of this worth trusting — it comes from the shape of the code.
 
 **Value** is 1–5 and it is *my* judgement, not yours. It rests on four
-assumptions about how this gets used, listed at the bottom. **Correcting one of
-those reorders the table far more usefully than arguing with an individual
-score**, so read those first and tell me which are wrong.
+assumptions about how this gets used — and, it turned out, on a fifth nobody had
+written down — all listed at the bottom. **Correcting one of those reorders the
+table far more usefully than arguing with an individual score**, so read those
+first and tell me which are wrong.
 
 | Value | |
 |---|---|
@@ -124,35 +126,40 @@ score**, so read those first and tell me which are wrong.
 
 ## The honest warning about ranking by ratio
 
-Sorted by value ÷ effort, the top eleven are all **S** and not one of them
-changes what this app *is*. You could ship every one and still be re-listening to
-a mostly-unchanged summary for twelve minutes each morning.
+Sorted by value ÷ effort, the top of the list is all **S** and not one of them
+changes what this app *is*. That warning stands, but it is worth reading beside
+what actually happened on Day 2: the twelve-minute morning was cut to one minute
+by an **S**, after the **M** scored 5 for the same outcome turned out not to
+work. Cheap and shallow are not the same axis.
 
 So the list is in two parts, and they are not competing: **the cheap wins are a
-day, not a plan.** Take them because they are nearly free, then go at the two
-fives.
+day, not a plan** — and one of them may be the whole plan. Take them because they
+are nearly free, then go at the fives.
 
 ---
 
-## Tier 1 · The free wins — one day, all of them
+## Tier 1 · The free wins — one day, all of them""")
 
-Eleven S items at value 3 or better. Ranked, but honestly the top four are the
+# Counted rather than remembered: the prose around a generated table is exactly
+# where a number goes stale without anyone noticing it has.
+rows_s = [r for r in rows if r[3] >= 3 and r[2] == "S"]
+w(f"""
+{len(rows_s)} S items at value 3 or better. Ranked, but honestly the top four are the
 ones that matter and the rest are the same afternoon.
 
 | | Idea | Value | Why |
 |---|---|---|---|""")
 
-rows_s = [r for r in rows if r[3] >= 3 and r[2] == "S"]
 for i, (n, t, e, v, c, ratio, why) in enumerate(rows_s, 1):
     w(f"| {i} | **{n}** | {v} | {why} |")
 
-w("""
-**Total cost: 11 points ≈ one focused day.** The first four are the ones to do
+w(f"""
+**Total cost: {sum(r[4] for r in rows_s)} points ≈ one focused day.** The first four are the ones to do
 even if you stop there.
 
 ---
 
-## Tier 2 · The two that earn a real day each
+## Tier 2 · What earns a real day
 
 | Idea | Effort | Value | |
 |---|---|---|---|""")
@@ -160,8 +167,21 @@ for n, t, e, v, c, ratio, why in [r for r in rows if r[3] == 5]:
     w(f"| **{n}** | {e} | {v} | {why} |")
 
 w("""
-These are the only two scored 5, and they are worth more than the whole of
-Tier 1 combined. One makes the content better; the other makes it reach you.
+There were two. 「今日有咩唔同」 — diff today's summary against yesterday's and read
+only what moved — scored 5 on a premise nobody had checked: that today's digest
+is yesterday's digest *edited*. **It is not.** Upstream regenerates the daily
+summary every morning, so two consecutive days share almost no wording even where
+they cover the same story. Sentence similarity calls 65 of 74 sentences new; the
+best block matching saves 2–4% of the runtime, and all of that saving is
+scaffolding. Without a model it cannot do the thing it was scored for, and the
+version that would work is 時間線 story threading, already on this page at L/4.
+
+**What replaced it cost an S and delivered the 5's promise anyway:** 快讀 / 提要 /
+全文, three lengths cut from the digest's own structure. Twelve minutes becomes
+1:02–1:25, on every archived day, with no baseline to compare against.
+
+The pattern worth keeping: *look for the cheapest route to a stated outcome
+before scheduling the highest-value idea that claims it.*
 
 ---
 
@@ -219,7 +239,7 @@ something narrow.
 w("""
 ---
 
-## The four assumptions the value column rests on
+## The assumptions the value column rests on
 
 Argue with these, not with the scores.
 
@@ -227,18 +247,32 @@ Argue with these, not with the scores.
    auto-play, resume and heard-state, so this is nearly certain — and it is why
    anything that shaves the daily twelve minutes scores 5, and anything you use
    once a year scores 2. *If listening is actually a few times a week,* 提要之提要
-   and the weekly catch-up rise sharply and the delta read falls.
+   and the weekly catch-up rise sharply, and 快讀 matters rather less — it is
+   the daily habit that makes a one-minute version worth having.
 2. **There is a hands-busy context — a commute, a kitchen, a walk.** This is the
    shakiest one, and it is doing the most work: it is the entire case for the
    podcast feed at 5, and for 早晨簡報, stream.mp3, AirPlay and voice commands
    above it. *If you only ever listen at a desk,* the whole 廣播 group drops by
-   two and Tier 1 plus the delta read becomes the whole plan.
+   two and Tier 1 plus 讀幾多 becomes the whole plan.
 3. **You are the only real listener; family is a maybe.** Keeps Telegram, email
    and multi-upstream low, and is why "share a clip" scores 2. *If you want
    family on this,* the Telegram voice note and the podcast both jump.
 4. **The archive is the point.** You keep everything; upstream keeps three days.
-   This lifts the delta read, 提要之提要, threading and archive export. It is
-   well supported by the code — the archive exists and almost nothing reads it.
+   This lifts 提要之提要, threading and archive export. It is well supported by
+   the code — the archive exists and almost nothing reads it.
+
+### The fifth assumption, which was never written down
+
+**That today's digest is yesterday's, edited.** It was carrying 「今日有咩唔同」's
+entire score, and it went unstated — which is why it went unchecked. The four
+above were argued over; this one was never visible enough to argue with. The
+archive settled it in an afternoon.
+
+Worth generalising: every 5 on this page rests on a claim about **the data**, not
+only on how you listen, and those are the cheap ones to check because the archive
+is sitting right there. 提要之提要 and 時間線 both assume what the delta read
+assumed — that days are comparable to each other — and both should be measured
+against real archived days before either is scheduled, not after.
 
 ## What this changes in the roadmap
 
@@ -254,6 +288,11 @@ value 3. Swapping them for the two value-4 items that were not in it:
 
 Two-voice and per-topic are not dropped — they are the next two in Tier 1, and
 all six fit a day if it goes well. Days 2, 3 and 4 survive scoring unchanged.
+
+**Day 2 did not survive contact with the data.** It was 「今日有咩唔同」 and is now
+讀幾多 — same outcome, a tenth of the work, arrived at by measuring the archive
+before building against it. Day 3 (the podcast feed) is untouched by the finding
+and is next.
 """)
 
 from pathlib import Path

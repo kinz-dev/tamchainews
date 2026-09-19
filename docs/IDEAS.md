@@ -53,7 +53,8 @@ nothing in the app uses it yet.
 
 | | | |
 |---|---|---|
-| **「今日有咩唔同？」** | Diff today's channel summary against yesterday's on the same topic and read only what moved. The single highest-value idea on this page — it turns a re-read into news. Sentence-level diff over the existing segment list; no model needed for v1. | M |
+| ~~**「今日有咩唔同？」**~~ | ~~Diff today's summary against yesterday's and read only what moved.~~ **Measured and dropped** — upstream regenerates the daily summary rather than editing it, so two days share no wording even on the same story. See Day 2 in `ROADMAP.md`. The version that would work needs story clustering or a model, and is 時間線 below. | M |
+| **讀幾多 · 快讀 / 提要 / 全文** | **Shipped** in its place: three lengths of the same day, cut from the digest's own structure. 快讀 is the 【本報訊】 lead upstream already writes — 1:02–1:25 against a full read of 11–14 minutes. | S |
 | **時間線 · story threading** | Cluster digests across days into a running story: 「美聯儲減息」 as one spine with fourteen beats, not fourteen unrelated summaries. | L |
 | **Entity pages** | Click 恒生指數 or a person's name and get every mention across the archive, playable end to end. | M |
 | **Contradiction flags** | When two channels on a topic say opposite things, mark it 🔀 and read both. | L |

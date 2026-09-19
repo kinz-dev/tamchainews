@@ -139,12 +139,20 @@ export function parseDailyId(id = '') {
  * this item. Otherwise fall back to the furthest point the listened record
  * knows about — that still beats starting over. A finished item starts again
  * from the top, because there is nothing left to resume.
+ *
+ * `total` is how many sentences are queued up *now*. A position is an index
+ * into a particular queue, and the daily view has three of them — 快讀, 提要 and
+ * 全文 are different lengths of the same day under one id. Sentence 30 of the
+ * full read is not sentence 30 of the 提要, so a stored position from a queue
+ * of another length is not translated, it is dropped: starting a short read at
+ * the top costs a minute, and resuming it in the wrong place costs the rest.
  */
-export function resumePoint(checkpoint, record, id, now = Date.now()) {
-  if (checkpoint && checkpoint.id === id && isResumable(checkpoint, now)) {
+export function resumePoint(checkpoint, record, id, { now = Date.now(), total = 0 } = {}) {
+  const fits = (entry) => !total || !entry.total || entry.total === total;
+  if (checkpoint && checkpoint.id === id && isResumable(checkpoint, now) && fits(checkpoint)) {
     return checkpoint.segment;
   }
-  if (record && !record.done && record.segment > 0) return record.segment;
+  if (record && !record.done && record.segment > 0 && fits(record)) return record.segment;
   return 0;
 }
 
