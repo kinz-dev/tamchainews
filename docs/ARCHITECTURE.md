@@ -120,6 +120,25 @@ not on the sesame box — so the reader is available to any tailnet device while
   Speech SDK is needed. Failures are told apart by hand because a browser reports a CORS
   refusal as an opaque `TypeError`.
 
+**`brief.js`** — 簡報, a fixed length of what you have not heard (pure, unit-testable)
+- `briefing(days, {seconds, stateFor, blocksFor, estimate})` walks the unheard days newest
+  first, taking each one's lead until the budget is *reached* (not stopped short of), and
+  tells the caller what it really is rather than what was asked for.
+- Only days in state `new`: playback starts at the top, so a part-heard day is one whose
+  lead you have already had.
+- It lives in the browser because heard-state does. A file rendered on the box can only
+  know what is newest, which is what this exists not to do.
+
+**`sw.js`** — the offline half of the PWA
+- Network-first for anything that is code, cache-first for audio. Cache-first for the shell
+  would recreate, on a device with no rebuild to run, the "serving the old files" failure
+  the README warns about.
+- `下載今日` posts the day's clip URLs — built by the same `ServerTtsBackend.url` the player
+  will ask with, so offline is the same requests — plus the day list and the rail feed.
+- Sequential fetches: a hundred synthesis requests at once is the burst Day 0 bounded.
+- A navigation that fails offline falls back to the cached `./`, since every address in
+  this app is the same document.
+
 **`player.js`** — playback engine behind one interface
 `play(fromSegment) / pause() / resume() / stop() / next() / prev() / seekTo(i)`, emitting
 `onSegmentStart / onEnd / onError`. Two swappable back-ends:

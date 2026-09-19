@@ -12,6 +12,7 @@ import {
   setTtsToken, chooseVoiceId,
 } from './player.js';
 import { AzureAccess, AZURE_VOICES, isRegion } from './azure.js';
+import { BRIEFS, briefing, briefQueue, describeBrief } from './brief.js';
 import {
   shapeDigest, splitRefs, feedHealth, healthSummary, topicCounts, recentlyAdded,
   darkFeeds, darkSummary, channelShare,
@@ -46,6 +47,7 @@ const els = {
   ttsTokenButton: $('tts-token'),
   lexicon: $('lexicon'), lexiconNote: $('lexicon-note'), exportArchive: $('export-archive'),
   copyPodcast: $('copy-podcast'), podcastNote: $('podcast-note'),
+  holdDay: $('hold-day'), dropHeld: $('drop-held'), offlineNote: $('offline-note'),
   azureKey: $('azure-key'), azureRegion: $('azure-region'), azureNote: $('azure-note'),
   azureSave: $('azure-save'), azureTest: $('azure-test'), azureForget: $('azure-forget'),
   prev: $('prev'), toggle: $('toggle'), next: $('next'), stop: $('stop'),
@@ -68,6 +70,7 @@ const state = {
   activeSubtitle: '',
   currentDay: null,
   dayBlocks: [],        // the open day's blocks, before the cut takes a length off them
+  brief: null,          // the running 簡報, while one is playing
   segments: [],
   listens: null,        // ListenStore
   highlighted: null,    // {container, original} while a block carries sentence spans
@@ -544,6 +547,20 @@ function userDrives() {
 
 /** Fold the playing position into the store, at most once per segment. */
 function recordProgress(index) {
+  // A briefing is several days' leads in one queue, so its progress belongs to
+  // whichever day is being read — recorded as the fraction of *that day* it
+  // really is. Which is also what takes the day out of tomorrow's briefing: it
+  // stops being unheard the moment its lead has been.
+  const segment = state.segments[index];
+  if (state.brief && segment?.briefDay) {
+    state.listens.advance(idFor.daily(segment.briefDay.day), {
+      segment: segment.briefAt + 1,
+      total: segment.briefTotal,
+      title: segment.briefDay.headline || segment.briefDay.day,
+    });
+    if (index % 4 === 0) refreshListenMarks();
+    return;
+  }
   if (!state.activeId || !state.segments.length) return;
   state.listens.advance(state.activeId, {
     segment: index,
@@ -940,6 +957,7 @@ function renderDailyView() {
 /** Render one day's digest as clickable sentences, the way the reader always worked. */
 function selectDay(dayId, { autoplay = false, resume = false, keepText = '' } = {}) {
   endHighlighting();
+  endBrief();
   const day = (state.daily?.days || []).find((d) => d.day === dayId);
   if (!day) return;
   state.currentDay = day;
@@ -1021,6 +1039,54 @@ function subtitleFor(day, plan) {
 }
 
 /**
+ * 簡報 — a fixed length of the days you have not started.
+ *
+ * Built here rather than on the box because the box does not know what you have
+ * heard and is not going to be told; see `brief.js`. The scheduled half of the
+ * idea — a file waiting at 07:30 — is the podcast, which already reaches you
+ * without the page being open.
+ */
+function playBrief(seconds, label) {
+  const days = state.daily?.days || [];
+  const brief = briefing(days, {
+    seconds,
+    stateFor: (day) => state.listens.stateOf(idFor.daily(day.day)),
+    blocksFor: (day) => prepare(day.text).blocks,
+    estimate: (segments) => estimateSeconds(segments, settings.rate),
+  });
+  if (brief.empty) {
+    return showBanner('冇未聽過嘅日子 — 全部都聽晒喇。', false, { seconds: 6 });
+  }
+
+  endHighlighting();
+  state.brief = brief;
+  state.activeSource = null;
+  state.activeId = '';            // a briefing is several days; none of them owns it
+  state.activeText = '';
+  state.activeTitle = label;
+  state.activeSubtitle = describeBrief(brief, formatClock);
+  state.segments = briefQueue(brief);
+
+  els.playerbar.hidden = false;
+  els.nowTitle.textContent = label;
+  els.nowSub.textContent = state.activeSubtitle;
+  loadIntoPlayer(state.segments);
+  player.play(0);
+
+  if (brief.short) {
+    showBanner(`未夠 ${formatClock(seconds)} 嘅新嘢 — 得 ${formatClock(brief.seconds)}。`,
+               false, { seconds: 6 });
+  }
+}
+
+/** Any brief in progress ends the moment something else is chosen to play. */
+function endBrief() {
+  if (!state.brief) return;
+  state.brief = null;
+  refreshListenMarks();
+}
+
+/**
  * The picker: three lengths of the same day, each priced at this reader's rate.
  *
  * Every one is planned in full to get its number rather than scaled off the
@@ -1047,6 +1113,24 @@ function renderCutBar(blocks) {
     group.appendChild(button);
   }
   bar.appendChild(group);
+
+  // 簡報 sits beside the cut picker because both answer the same question —
+  // how much am I listening to — and this one answers it across days.
+  const briefs = el('div', 'brief-pick');
+  for (const { id, label, seconds } of BRIEFS) {
+    const button = el('button', 'brief');
+    button.type = 'button';
+    button.dataset.brief = id;
+    button.title = '未聽過嘅日子，每日讀導語';
+    button.appendChild(el('span', 'k', label));
+    button.appendChild(el('span', 't', formatClock(seconds)));
+    button.addEventListener('click', () => {
+      userDrives();
+      playBrief(seconds, label);
+    });
+    briefs.appendChild(button);
+  }
+  bar.appendChild(briefs);
 
   // The outlook section is the one part whose shape repeats daily. Its numbers
   // do change, so it is offered as a choice and priced rather than dropped.
@@ -1584,21 +1668,19 @@ async function load({ force = false } = {}) {
   els.view.replaceChildren(el('p', 'placeholder', '載入中…'));
   try {
     if (view === 'daily') {
-      const dailyParams = routeToParams(state.route);
-      dailyParams.delete('topics');
-      dailyParams.delete('channel');
-      dailyParams.delete('page');
-      if (force) dailyParams.set('refresh', '1');
-      const dailyQuery = dailyParams.toString();
-      state.daily = await fetchJson(`/api/daily${dailyQuery ? `?${dailyQuery}` : ''}`);
+      state.daily = await fetchJson(dailyUrl(force));
       // The rail, the status strip and the "has upstream checked since?" test
       // all read the full feed, so a refresh here has to renew that too — not
-      // just the day list.
+      // just the day list. But none of them is the day you came to hear, and
+      // held offline the day list is in the cache while a wider feed query may
+      // not be. Losing the reader to a missing topic list would be the offline
+      // pack failing at the one moment it exists for.
       if (!state.feed || force) {
-        const railParams = routeToParams(state.route);
-        if (force) railParams.set('refresh', '1');
-        const railQuery = railParams.toString();
-        state.feed = await fetchJson(`/api/feed${railQuery ? `?${railQuery}` : ''}`);
+        try {
+          state.feed = await fetchJson(railUrl(force));
+        } catch {
+          state.feed = state.feed || null;
+        }
       }
     } else {
       const params = routeToParams(state.route);
@@ -1785,6 +1867,137 @@ els.copyPodcast.addEventListener('click', async () => {
     showBanner(url, false, { seconds: 20 });
   }
 });
+
+// --------------------------------------------------------------- 離線
+
+/**
+ * The day-list request, built in one place.
+ *
+ * The offline pack caches responses by URL, and the reader asks for them by
+ * URL, so the two have to be the *same string* — a stray `?` on the end is a
+ * different key and a page that opens to 「載入失敗」 in the tunnel.
+ */
+function railUrl(force = false) {
+  const params = routeToParams(state.route);
+  if (force) params.set('refresh', '1');
+  const query = params.toString();
+  return `/api/feed${query ? `?${query}` : ''}`;
+}
+
+function dailyUrl(force = false) {
+  const params = routeToParams(state.route);
+  params.delete('topics');
+  params.delete('channel');
+  params.delete('page');
+  if (force) params.set('refresh', '1');
+  const query = params.toString();
+  return `/api/daily${query ? `?${query}` : ''}`;
+}
+
+/**
+ * Hold a day on the device, so the tunnel is not the end of it.
+ *
+ * The clips are cached at the **URLs the player already asks for**, built by
+ * the same `ServerTtsBackend.url` that will ask for them — so nothing needs a
+ * second code path for offline, and there is no second version of the URL to
+ * drift. Offline, the reader behaves exactly as it does online because it is
+ * making exactly the same requests.
+ *
+ * The whole day, never the current cut: a pack that only holds 快讀 is one that
+ * runs out the moment you want more, in the one place you cannot go and get it.
+ * Rate is part of the URL, so a day is held at the speed it was held at.
+ */
+function offlineUrlsFor(day) {
+  if (!state.serverVoices.length) return [];
+  const { voiceId, rate } = prefsForTopic(settings.topicPrefs, state.route.topic, settings);
+  const serverId = voiceId.startsWith('server:') ? voiceId.slice('server:'.length)
+                                                 : state.serverVoices[0].id;
+  const backend = new ServerTtsBackend(serverId, '', { quoteVoiceId: quoteVoiceFor(serverId) });
+  const { segments } = planCut(prepare(day.text).blocks, { cut: 'full' });
+  return segments.map((segment) => backend.url(segment, rate));
+}
+
+async function describeOffline() {
+  const worker = navigator.serviceWorker?.controller;
+  els.holdDay.hidden = !worker || !state.serverVoices.length;
+  els.dropHeld.hidden = true;
+  if (!worker) return;
+  try {
+    const { usage = 0 } = await navigator.storage.estimate();
+    const megabytes = usage / 1e6;
+    if (megabytes >= 0.5) {
+      els.offlineNote.textContent = `裝置上存咗 ${megabytes.toFixed(1)} MB。`;
+      els.offlineNote.hidden = false;
+      els.dropHeld.hidden = false;
+      return;
+    }
+  } catch { /* no estimate on this browser; the button still works */ }
+  els.offlineNote.hidden = true;
+}
+
+els.holdDay.addEventListener('click', () => {
+  const day = state.currentDay || (state.daily?.days || [])[0];
+  const worker = navigator.serviceWorker?.controller;
+  if (!day || !worker) return;
+  // The day list goes in the pack too, or the held audio has no page to play
+  // it: /api/daily is only fetched at boot, which on a first install happens
+  // before the worker is controlling anything.
+  // The rail's feed as well, so a held day opens with its topics and its
+  // status strip rather than as a reader with an empty frame around it.
+  const urls = [dailyUrl(), railUrl(), ...offlineUrlsFor(day)];
+  if (urls.length < 3) return;
+  els.offlineNote.hidden = false;
+  els.offlineNote.textContent = `下載緊 ${day.day}… 0/${urls.length}`;
+  worker.postMessage({ type: 'cache-urls', urls });
+});
+
+els.dropHeld.addEventListener('click', () => {
+  navigator.serviceWorker?.controller?.postMessage({ type: 'drop-audio' });
+});
+
+/**
+ * Offline is only as good as the page saying so.
+ *
+ * A download that reports "done" having quietly failed a third of its clips is
+ * worse than no download: you find out in the tunnel. So the count that is
+ * shown is what was actually stored, and anything that did not make it is said
+ * out loud.
+ */
+function watchServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const message = event.data || {};
+    if (message.type === 'cache-progress') {
+      els.offlineNote.hidden = false;
+      els.offlineNote.textContent = `下載緊… ${message.done}/${message.total}`;
+    }
+    if (message.type === 'cache-done') {
+      els.offlineNote.textContent = message.failed
+        ? `存咗 ${message.held}/${message.total} 段，${message.failed} 段失敗。`
+        : `已經存咗成日（${message.held} 段）。`;
+      els.offlineNote.hidden = false;
+      describeOffline().then(() => {
+        if (message.failed) els.offlineNote.textContent += ' 有部分未下載到。';
+      });
+    }
+    if (message.type === 'cache-dropped') {
+      els.offlineNote.textContent = '離線內容已經清除。';
+      els.dropHeld.hidden = true;
+    }
+  });
+  navigator.serviceWorker.register('sw.js').then(() => {
+    // `controller` is null on the very first load, before the worker has taken
+    // over — so the buttons appear once it has, rather than never.
+    if (navigator.serviceWorker.controller) return describeOffline();
+    navigator.serviceWorker.addEventListener('controllerchange', describeOffline, { once: true });
+    return undefined;
+  }).catch((error) => {
+    // Plain http on a LAN address refuses workers, and so does a private
+    // window. Say which rather than leaving the buttons quietly absent.
+    els.offlineNote.textContent = `離線功能用唔到：${error.message}`;
+    els.offlineNote.hidden = false;
+  });
+}
 
 // ------------------------------------------------------------- Azure 語音
 
@@ -2066,6 +2279,7 @@ document.addEventListener('keydown', (event) => {
   els.copyPodcast.hidden = !state.config.podcast;
   if (state.config.podcast) describePodcast();
   describeAzure();
+  watchServiceWorker();
   await setupVoices();
   if (!location.hash) location.hash = buildRoute({ view: 'digests' });
   state.route = parseRoute(location.hash);

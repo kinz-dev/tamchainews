@@ -17,7 +17,7 @@ new storage or a second process is a different kind of day.
 | ~~**1**~~ | ~~好聽啲 · Make it sound better~~ | **Done.** All nine Tier 1 items, plus a voice-selection bug that scoring had pointed at backwards. |
 | ~~**2**~~ | ~~今日有咩唔同~~ → 讀幾多 · Three lengths | **Done.** The delta read died on real data; the digest's own lead turns twelve minutes into one. |
 | ~~**3**~~ | ~~出街 · Get it off the laptop~~ | **Done.** The podcast feed, and Azure client-direct with the key held wherever you want it. stream.mp3 slips to Day 4. |
-| **4** | 食晒佢 · Finish what Day 3 starts | The rest of the value-4 items, three of which ride Day 3's render pipeline. |
+| **4** | 食晒佢 · Finish what Day 3 starts | **Three of four done** — 簡報, 一週提要 and the offline pack. Code-switch and stream.mp3 remain. |
 
 ---
 
@@ -301,39 +301,90 @@ did not need one, and the whole group is out of `IDEAS.md`. What replaces it is
 the rest of Tier 3, chosen because three of the four ride the nightly render
 Day 3 has just built.
 
-**1. 早晨 / 夜晚簡報** — M · *value 4*
+**1. 簡報** — ✅ done, in the browser rather than the render pass
 
-A four-minute cut at 07:30 and a ten-minute one at 22:00, assembled from what
-you have **not** heard rather than from what is newest. Day 3's render pass
-already walks the segments and concatenates them; this picks a different set and
-stops at a length.
+**The premise it was written on is wrong, and this is the third time.** It was
+"a four-minute *file* at 07:30, assembled from what you have not heard" — but
+what you have heard lives in this browser's IndexedDB and nowhere else. The box
+is never told, because being told needs accounts, which are parked on purpose a
+few lines below. A file rendered on the box can only know what is *newest*,
+which is precisely the thing this feature exists not to do.
 
-The distinction is the whole point: "newest" is what every feed gives you, and
-it re-reads things you sat through yesterday. `listened.js` knows better.
+So it is a button, not a file: **簡報 4:00** and **長簡報 10:00** beside the
+length picker, taking the lead of every day you have not started, newest first,
+until the minutes are used. The scheduled half of the idea is the podcast, which
+already reaches you without the page being open.
 
-*Done when* 07:30 produces a four-minute file that contains nothing you have
-already finished, and says so when there is not four minutes of new material.
+Two decisions worth keeping:
 
-**2. 提要之提要 · The weekly** — M · *value 4*
+- It takes the smallest set that **reaches** the budget rather than the largest
+  that fits under it, and reports what it really is — 「3 日 · 4:25」 — because
+  coming up a minute short of the length you asked for is worse than going half
+  a minute over, and quoting the round number would be a third thing.
+- Playing a day's lead records that day as **part-heard**, which is what it is,
+  and takes it out of the next briefing. Verified end to end: three days at
+  4:25, then the remaining three at 4:17, then 「冇未聽過嘅日子」.
 
-A weekly and a monthly super-digest built from the archive rather than from
-upstream — which can only be done here, because upstream keeps three days and
-you keep everything.
+**2. 一週提要 · The weekly** — ✅ done
 
-This is the catch-up after a week away, and it is the second feature after the
-delta read to treat the archive as an asset rather than a backup.
+`/api/weekly.xml`, one episode per ISO week: every archived day's lead, Monday
+forward. **Five days that run 70 minutes in full read back in 7:26**, measured
+on the live archive; seven come to about ten.
 
-*Done when* a Sunday file summarises the week in under ten minutes, drawn from
-`data/archive/` with no upstream call at all.
+No model, and no summary of a summary. Upstream already writes one summary of
+each day; the week is those, in order — the only version of this that can be
+checked against what was actually published. It costs nothing to make, either:
+the leads are byte ranges Day 3's manifests already hold.
 
-**3. Offline pack** — M · *value 4*
+Its own feed rather than an extra item in the daily one, because they are
+different subscriptions — the daily is the habit, this is the catch-up after a
+week away — and a client subscribed to both should not be handed the same audio
+twice under one guid.
 
-「下載今日」 bakes the day's segments into Cache Storage so the PWA works with no
-signal. The MTR is the case, and it is the one place the podcast feed does not
-already cover — Apple Podcasts downloads for you, a home-screen PWA does not.
+**3. Offline pack** — ✅ done
 
-*Done when* aeroplane mode still reads the day, and the rail says how much is
-held.
+The app had **no service worker at all**, so "the PWA works with no signal" was
+not a degraded experience — the page would not open. That was the real cost of
+this item, and it is now paid.
+
+**Network-first for anything that is code.** The obvious service worker serves
+the cache first; here that would recreate, on a device with no rebuild to run,
+exactly the failure this repo already warns about — a restart that "looks
+exactly like a change that did not work". Online you get today's code; offline
+you get yesterday's rather than nothing. Audio is cache-first, because a clip
+for a given day, voice and rate never changes.
+
+The clips are held at **the URLs the player already asks for**, built by the
+same `ServerTtsBackend.url` that will ask for them, so offline the reader
+behaves as it does online because it is making the same requests.
+
+**Two things only running it found**, both of which would have shipped a pack
+that fails in the tunnel:
+
+- The day list was never in the cache. `/api/daily` is fetched once, at boot,
+  which on a fresh install happens *before* the worker is controlling anything —
+  so there was nothing to fall back to. The pack holds the day list and the
+  rail's feed now, not only the audio.
+- The rail's feed fetch sat in the same `try` as the day list and took the whole
+  view down with it. Offline, the day you came to hear was in the cache and a
+  topic list was not, and the reader was lost to it. The rail is now allowed to
+  fail on its own.
+
+*Verified by stopping the container outright rather than simulating offline:*
+with the server down, a navigation to `/index.html#/daily` — a path never cached
+under its own name — loads through the navigation fallback, all five days
+render, the rail fills, and a cached clip serves 11.5 s of audio.
+
+**4. Code-switch detection** — not started · M · *value 4*
+
+The day did not have room, and it is the one item here that is not a matter of
+wiring: `/api/tts` validates the requested voice against `TTS_VOICES`, which is
+three zh-HK voices, so an English span has nowhere to go until the server has an
+English voice to offer. And a segment that becomes several clips makes
+`speak()` a sequence rather than one request. Both are contained, neither is
+free, and the honest place for it is the front of the next day.
+
+Original note follows.
 
 **4. Code-switch detection** — M · *value 4* · *if the day has room*
 

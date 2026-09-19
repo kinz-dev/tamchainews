@@ -234,6 +234,75 @@ that rewrites it. Like the page itself, the feed and the episodes are
 unauthenticated: they are already-rendered bytes, so no request to them reaches
 Microsoft or spends the budget.
 
+### 簡報 · A fixed length of what you have not heard
+
+**簡報 4:00** and **長簡報 10:00**, beside the length picker. Each takes the
+【本報訊】 lead of every day you have **not started**, newest first, until the
+minutes are used up — so it is a catch-up rather than a re-read, and it says
+what it really is (「3 日 · 4:25」) rather than the round number you asked for.
+
+Playing a day's lead in a briefing records that day as part-heard, which is
+exactly what it is — and takes it out of the next briefing. When every day has
+had its lead heard, it says so instead of playing something you have heard.
+
+**Why this is in the browser rather than in the nightly render.** It was
+scheduled as a file rendered at 07:30. It cannot be: what you have heard lives
+in this browser's IndexedDB and nowhere else, and the box is never told, because
+being told would need accounts this app has deliberately never had. A file made
+on the box can only know what is *newest*, which is the thing this feature
+exists not to do. The scheduled half of the idea is the podcast, which already
+reaches you without the page being open.
+
+### 一週提要 · The week, in ten minutes
+
+```
+http://<this box>/api/weekly.xml          # one episode per ISO week
+```
+
+Each week is every archived day's lead, Monday forward. Measured on the archive:
+**five days that run 70 minutes in full read back in 7:26.** Seven days come to
+about ten minutes.
+
+No model and no summary of a summary — upstream already writes one summary of
+each day, and the week is those in order, which is the only version of this that
+can be checked against what was actually published. It is also the second thing
+here that upstream could not build at all: it keeps three days, and this keeps
+everything.
+
+It is a separate feed from the daily one rather than an extra item in it,
+because they are different subscriptions — the daily is the habit, this is the
+catch-up after a week away — and a client subscribed to both should not be
+handed the same audio twice under one guid.
+
+### ✈ 下載今日 · Offline
+
+A home-screen app that cannot open in a tunnel is a bookmark. **下載今日** holds
+a day on the device: the day's clips, the day list, and the rail's feed, so the
+reader opens and reads with no signal at all.
+
+The clips are cached at **the URLs the player already asks for**, so offline the
+reader behaves exactly as it does online — it is making exactly the same
+requests. The whole day is held, never the current cut: a pack that only holds
+快讀 runs out in the one place you cannot go and get more.
+
+**The shell is network-first, not cache-first.** The obvious service worker
+serves the cache and revalidates later; here that would recreate, on a device
+with no rebuild to run, exactly the failure this README already warns about — a
+restart that "looks exactly like a change that did not work". Online you always
+get today's code; offline you get yesterday's rather than nothing. Audio is
+cache-first, because a clip for a given day, voice and rate never changes.
+
+Clips are fetched one at a time, for the same reason the nightly render paces
+itself: a hundred synthesis requests at once is the burst Day 0 went to the
+trouble of bounding. A day is about a minute of trickle and 4–6 MB, and the note
+says how much is held and what failed, because a download that reports success
+having quietly lost a third of its clips is worse than none — you find out in
+the tunnel.
+
+*Verified by stopping the server outright rather than simulating it:* with the
+container down, the page loads, all five days render, the rail fills, and a
+cached clip serves 11.5 s of audio.
+
 ### What you have already heard
 
 Playback position is kept in the browser's **IndexedDB**, per item, so the page
@@ -460,6 +529,8 @@ through everything unheard.
 | `GET /api/episode.mp3` | `?day=YYYY-MM-DD[&cut=quick][&skip=outlook]` → the day's audio, honouring `Range` |
 | `GET /api/chapters.json` | Podcasting 2.0 chapters for a day, one per heading |
 | `GET /api/episodes` | what has been rendered: `{episodes: [{day, headline, seconds, bytes, rendered_at}], voice, keep_days}` |
+| `GET /api/weekly.xml` | the weekly feed: one episode per ISO week, each day's lead Monday forward |
+| `GET /api/week.mp3` | `?week=2026-W38` → that week's leads, joined |
 | `GET /api/health` | `{ok, tts}` |
 
 `?refresh=1` bypasses the cache on `/api/feed` and `/api/daily`. Each distinct
@@ -497,6 +568,8 @@ web/listened.js       listened-to state: IndexedDB + the pure state arithmetic
 web/speech.js         Markdown → speakable segments (pure, unit-tested)
 web/cut.js            one day at three lengths: 快讀 / 提要 / 全文 (pure, unit-tested)
 web/azure.js          Azure Speech from the browser: SSML, endpoints, credentials (pure, unit-tested)
+web/brief.js          簡報: a fixed length of what you have not heard (pure, unit-tested)
+web/sw.js             the service worker: offline shell, held days, network-first code
 web/player.js         playback queue + the two voice back-ends
 web/app.js            UI wiring: router, four views, speak buttons
 web/icon.svg          the app mark — a 譚仔 bowl broadcasting
