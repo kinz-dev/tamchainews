@@ -93,6 +93,21 @@
     </div>
 
     <div class="rail-section">
+      <h2 class="rail-title">Azure 語音</h2>
+      <p class="rail-note">用你自己嘅 Azure key，直接喺呢部機同 Azure 講。Key 淨係存喺呢個瀏覽器。</p>
+      <input id="azure-region" class="rail-search" type="text" autocomplete="off"
+             spellcheck="false" placeholder="region，例如 eastasia">
+      <input id="azure-key" class="rail-search" type="password" autocomplete="off"
+             spellcheck="false" placeholder="subscription key">
+      <div class="rail-row">
+        <button id="azure-save" class="rail-button" type="button">儲存</button>
+        <button id="azure-test" class="rail-button" type="button">測試</button>
+        <button id="azure-forget" class="rail-button" type="button" hidden>清除</button>
+      </div>
+      <p id="azure-note" class="rail-note" hidden></p>
+    </div>
+
+    <div class="rail-section">
       <h2 class="rail-title">頻道 <span id="channel-count" class="rail-count"></span></h2>
       <input id="channel-filter" class="rail-search" type="search" placeholder="搜尋頻道…" autocomplete="off">
       <ul id="channel-list" class="rail-list channels"></ul>

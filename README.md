@@ -349,14 +349,47 @@ the real bound on a public URL is the budget, which needs no secret at all.
 
 #### Azure
 
-With `azure_key` and `azure_region` set, `/api/speech-token` mints a ten-minute
-Azure token and the browser talks to Azure **directly**. `zh-HK-HiuGaai`,
-`HiuMaan` and `WanLung` are Azure's own voices — the same ones `edge-tts`
-reaches through the undocumented door. The difference is an account: a
-documented quota, a key that can be rotated, and abuse that spends the token's
-allowance instead of this box's reputation.
+`zh-HK-HiuGaai`, `HiuMaan` and `WanLung` are Azure's own voices — the same ones
+`edge-tts` reaches through the undocumented door. The difference is an account:
+a documented quota, a key that can be rotated, and abuse that spends *that*
+allowance instead of this box's reputation with an endpoint that has no account
+behind it at all.
 
-The key never leaves the server.
+The browser talks to Azure **directly** either way. Which is possible at all
+because the REST endpoint answers a cross-origin request: a `POST` to
+`https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` with
+`Ocp-Apim-Subscription-Key` and `X-Microsoft-OutputFormat` clears its CORS
+preflight and returns a response script can read — checked against the live
+endpoint, which answered `401` to a deliberately wrong key rather than being
+blocked. **No Speech SDK is needed.**
+
+There are two places to keep the key, and they are different trades:
+
+| | |
+|---|---|
+| **On the box** | `azure_key` + `azure_region` in `config.json`. `/api/speech-token` mints a ten-minute token; **the key never leaves the server**. Right when the box is yours and the browsers are many. |
+| **In the browser** | The rail's **Azure 語音** section. The key stays in this browser's `localStorage`, is sent to Azure by this browser, and spends its own quota. Nothing is configured on the box, and one device can use Azure while another does not. |
+
+In browser mode the key goes on the request directly rather than minting a token
+first — a token exists to avoid exposing the key, which buys nothing once the
+browser is the thing holding it.
+
+**A subscription key is a billable credential**, and `localStorage` on a
+funnel-published page is a weaker place for it than `config.json` on the box:
+anything that can run script on this origin can read it, and unlike a token it
+does not expire. Worth choosing deliberately, and worth rotating in the Azure
+portal rather than trusting 清除 to have been enough.
+
+Azure never becomes the voice on its own. It appears in the 語音 picker once
+there is a key to use, and choosing it is the whole opt-in — so the same
+install can read aloud through the browser's voice on one device, this box's
+`edge-tts` on another, and an Azure account on a third.
+
+**測試** synthesises one word and says exactly what came back. That exists
+because a browser reports a blocked cross-origin request as an opaque
+`TypeError`, indistinguishable from the network being down — so the failures are
+told apart by hand: a refused key, a refused token, a CORS or network problem, or
+a plain HTTP status.
 
 ### Voices
 
@@ -463,6 +496,7 @@ web/feed.js           upstream JSON → view models, routing (pure, unit-tested)
 web/listened.js       listened-to state: IndexedDB + the pure state arithmetic
 web/speech.js         Markdown → speakable segments (pure, unit-tested)
 web/cut.js            one day at three lengths: 快讀 / 提要 / 全文 (pure, unit-tested)
+web/azure.js          Azure Speech from the browser: SSML, endpoints, credentials (pure, unit-tested)
 web/player.js         playback queue + the two voice back-ends
 web/app.js            UI wiring: router, four views, speak buttons
 web/icon.svg          the app mark — a 譚仔 bowl broadcasting
