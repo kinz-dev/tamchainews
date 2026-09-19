@@ -10,12 +10,12 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py config.json ./
+COPY server.py render.py config.json ./
 COPY web/ ./web/
 
 # The archive is the only state, and it is what gives the reader a history
 # past the three days upstream keeps.
-RUN mkdir -p /app/data/archive && \
+RUN mkdir -p /app/data/archive /app/data/audio && \
     useradd --create-home --uid 10001 tamchai && \
     chown -R tamchai:tamchai /app/data
 USER tamchai

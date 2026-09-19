@@ -227,11 +227,21 @@ export function prepare(markdown, options) {
 /**
  * Rough seconds per segment, used for the progress read-out.
  *
+ * 3.75 *spoken* characters a second — `speak`, not `text`, so the citations and
+ * glosses that never reach the voice are not counted. Measured against two days
+ * of audio the podcast renderer produced with zh-HK-HiuGaai at +0%: 3,627
+ * spoken characters ran 968s, and 2,839 ran 753s. The 4.5 that stood here was
+ * a guess and it was a tenth short, which matters more since 讀幾多 — a picker
+ * whose whole argument is that its three numbers are real.
+ *
+ * A browser voice is not this voice, so this is the server voice's rate and an
+ * approximation of any other.
+ *
  * The gaps scale with the rate too — the player shortens them by the same
  * factor (`_gap` divides by rate), and at 2× the pauses are a big enough share
  * of the total that leaving them fixed overstates the running time.
  */
-export function estimateSeconds(segments, rate = 1, charsPerSecond = 4.5) {
+export function estimateSeconds(segments, rate = 1, charsPerSecond = 3.75) {
   return segments.reduce(
     (total, segment) =>
       total + segment.speak.length / (charsPerSecond * rate) + segment.pauseAfter / 1000 / rate,

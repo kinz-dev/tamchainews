@@ -51,7 +51,7 @@ the synthesiser behind it.
 docker compose up -d          # http://127.0.0.1:8082/
 ```
 
-The image carries `server.py`, `web/` and `edge-tts`, and nothing else — no
+The image carries `server.py`, `render.py`, `web/` and `edge-tts`, and nothing else — no
 tests, no docs, no virtualenv. It runs as a non-root user and answers a
 healthcheck on `/api/health`.
 
@@ -67,8 +67,9 @@ container — so the image sets `TAMCHAI_HOST=0.0.0.0` and compose publishes the
 port back onto `127.0.0.1` only. Put `tailscale serve`/`funnel` in front of
 that rather than opening the port to the LAN.
 
-The day archive lives in the `tamchai-data` volume and survives the container
-being replaced; it is the only state the app has.
+The day archive and the rendered episodes live in the `tamchai-data` volume and
+survive the container being replaced; they are the only state the app has. Text
+is kept for ever, audio for `podcast_keep_days`.
 
 `server.py` and `web/` are baked into the image, so **editing them needs a
 rebuild** — `docker compose up -d --build`. A plain `restart` keeps serving the
@@ -148,15 +149,21 @@ string: `[12]` stays a link on screen and is never read aloud.
 
 ### 讀幾多 · How much of a day to read
 
-A full daily summary is eleven to fourteen minutes, and most mornings that is
+A full daily summary is twelve to sixteen minutes, and most mornings that is
 more than the time there is. The reader offers three lengths of the same day,
 each priced at your current speed:
 
 | | | |
 |---|---|---|
-| **快讀** | ~1:15 | The 標題 and the 【本報訊】 lead — everything above the first sub-heading |
-| **提要** | ~2:30 | That, plus every heading and the first sentence under it |
-| **全文** | ~11:00 | The whole thing, as it always was |
+| **快讀** | ~1:30 | The 標題 and the 【本報訊】 lead — everything above the first sub-heading |
+| **提要** | ~3:00 | That, plus every heading and the first sentence under it |
+| **全文** | ~13:00 | The whole thing, as it always was |
+
+Those are estimates, and they now land within about 3% of the audio the podcast
+renderer produces — because the renderer is what corrected them. The reader had
+been assuming 4.5 characters a second since the beginning; two rendered days put
+it at **3.75 spoken characters a second**, so every duration the app showed was a
+tenth to a fifth short of the truth.
 
 The lead is not a truncation: upstream writes it as a summary of the whole day,
 so 快讀 is the two-minute version of the digest that already existed and was
@@ -176,6 +183,56 @@ are mentioned once, in a banner, rather than applied to your morning unasked.
 A position is an index into a particular queue, and one day now has three of
 different lengths under one id — so a stopping point recorded against one length
 is dropped rather than translated when you resume at another.
+
+### 出街 · The podcast feed
+
+Every archived day is rendered once, overnight, into a single MP3 — so anything
+that can subscribe to a podcast becomes a client, and CarPlay comes free:
+
+```
+http://<this box>/api/podcast.xml              # 全文, with chapters
+http://<this box>/api/podcast.xml?cut=quick    # 快讀 — just the lead
+http://<this box>/api/podcast.xml?skip=outlook # without 市場情緒展望
+```
+
+The rail's **🎧 複製 podcast 網址** copies the address at whatever length you are
+currently reading — a podcast client wants a URL typed into it, and following
+the link in a browser only ever shows you XML.
+
+**How a day becomes a file.** edge-tts returns constant-bitrate 48 kbps, 24 kHz
+mono MP3 in 144-byte frames with no header on either end, so joining clips is
+joining byte strings and **duration is bytes ÷ 6000 exactly**. The renderer
+synthesises a *block* at a time — a whole paragraph in one request, which keeps
+the prosody sentence-by-sentence synthesis throws away — and records each
+block's byte offset. Everything else falls out of those offsets:
+
+| | |
+|---|---|
+| **Chapters** | one per heading, at its own timestamp, as a Podcasting 2.0 `chapters.json` |
+| **快讀** | the lead is the first blocks, so the cut is a byte *prefix* — no second render |
+| **略過市場情緒展望** | drops a run of blocks out of the middle, still on frame boundaries |
+| **`Range`** | served, so a client can resume a half-finished download |
+
+Apple Podcasts reads chapters from ID3 frames rather than the JSON file, so
+chapter marks show up in Pocket Casts and not in Apple's client yet.
+
+**提要 has no feed.** It takes the first *sentence* of a paragraph, and a
+block-level render has nothing to slice there. The app says so rather than
+quietly handing over a different length.
+
+**What it costs.** About twenty requests per day rendered, a few seconds apart;
+one day is roughly 100 seconds of synthesis and 4–6 MB. Audio is swept past
+`podcast_keep_days` (30), while the text archive is kept for ever — a day of
+audio is a thousand times the size of the day, and an episode nobody downloaded
+in a month can always be rendered again from the text. Set `podcast_voice` to
+`""` to switch the whole pass off; already-rendered days keep serving.
+
+The feed hands out absolute URLs, which a podcast client resolves from wherever
+it is rather than from this box, so it names the host from the `Host` header —
+right behind `tailscale serve`, and overridable with `public_url` for anything
+that rewrites it. Like the page itself, the feed and the episodes are
+unauthenticated: they are already-rendered bytes, so no request to them reaches
+Microsoft or spends the budget.
 
 ### What you have already heard
 
@@ -364,8 +421,12 @@ through everything unheard.
 | `GET /api/daily` | `{days: [{day, headline, text, chars, est_seconds, …}], cached, upstream_error, tts_voices}` |
 | `GET /api/tts` | `?text=&voice=&rate=±N%` → `audio/mpeg`. `401` without the token, `429` with `Retry-After` once the budget is spent |
 | `GET /api/speech-token` | a 10-minute Azure Speech token, so the browser can talk to Azure itself. `503` unless `azure_key` and `azure_region` are set |
-| `GET /api/config` | `{base_url, feed_ttl, chars_per_second, tts, tts_voices, tts_token_required, tts_trusted, azure, archive}` |
+| `GET /api/config` | `{base_url, feed_ttl, chars_per_second, tts, tts_voices, tts_token_required, tts_trusted, azure, archive, podcast}` |
 | `GET /api/archive.tar.gz` | every archived day, gzipped. The archive is the one thing upstream does not also have |
+| `GET /api/podcast.xml` | the feed: one episode per rendered day. `?cut=quick` for the lead only, `?skip=outlook` to leave off 市場情緒展望 |
+| `GET /api/episode.mp3` | `?day=YYYY-MM-DD[&cut=quick][&skip=outlook]` → the day's audio, honouring `Range` |
+| `GET /api/chapters.json` | Podcasting 2.0 chapters for a day, one per heading |
+| `GET /api/episodes` | what has been rendered: `{episodes: [{day, headline, seconds, bytes, rendered_at}], voice, keep_days}` |
 | `GET /api/health` | `{ok, tts}` |
 
 `?refresh=1` bypasses the cache on `/api/feed` and `/api/daily`. Each distinct
@@ -397,6 +458,7 @@ Dockerfile            the image: python:3.13-slim + edge-tts, non-root
 docker-compose.yml    the stack: loopback port, archive volume, base_url
 config.json           base_url, the tts token and budget, and the rest of the knobs
 server.py             sidecar: upstream proxy + per-query cache + archive + on-demand TTS
+render.py             the nightly pass: one archived day -> one MP3 + its manifest
 web/feed.js           upstream JSON → view models, routing (pure, unit-tested)
 web/listened.js       listened-to state: IndexedDB + the pure state arithmetic
 web/speech.js         Markdown → speakable segments (pure, unit-tested)
@@ -406,7 +468,7 @@ web/app.js            UI wiring: router, four views, speak buttons
 web/icon.svg          the app mark — a 譚仔 bowl broadcasting
 tools/make_icons.py   redraws icon.svg into favicon.ico and the PNG sizes
 tools/score_ideas.py  scores the ideas and regenerates docs/PRIORITY.md
-tests/                node --test (web/) + unittest (server.py)  ·  npm test
+tests/                node --test (web/) + unittest (server.py, render.py)  ·  npm test
 docs/ARCHITECTURE.md  the design and the constraints behind it
 docs/IDEAS.md         everything on the table, from the obvious to the daft
 docs/PRIORITY.md      all of it scored for value and effort, and ranked

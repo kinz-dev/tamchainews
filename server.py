@@ -36,6 +36,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
+import render
+
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "web"
 CONFIG_PATH = ROOT / "config.json"
@@ -46,7 +48,12 @@ DEFAULTS = {
     "base_url": "http://sesame.tailb2a681.ts.net:8081",
     "feed_ttl": 600.0,          # upstream refreshes every 2h; this only shields it from hammering
     "upstream_timeout": 30.0,
-    "chars_per_second": 4.5,    # measured against zh-HK neural voices at rate 1.0
+    # Raw archived characters per second of speech — markdown, citations and
+    # Latin glosses included, because that is what `est_seconds` is divided
+    # from. Measured against two full days the renderer actually synthesised
+    # (3,971 chars -> 968s, 3,189 -> 753s), not guessed: the 4.5 that stood
+    # here understated every day on the page by about a tenth.
+    "chars_per_second": 4.1,
     "host": "127.0.0.1",
     "port": 8082,
 
@@ -55,13 +62,26 @@ DEFAULTS = {
     # loopback-only bind and wrong the moment `tailscale funnel` is involved.
     "tts_token": "",
     "tts_burst_chars": 20000,   # a listener's opening run, uninterrupted
-    "tts_chars_per_hour": 60000,  # ~3.7x continuous listening at 4.5 chars/sec
+    "tts_chars_per_hour": 60000,  # ~4.4x continuous listening at 3.75 spoken chars/sec
 
     # Azure Speech: the documented door to the same zh-HK voices. With a key
     # set, the browser is handed a 10-minute token and talks to Azure itself,
     # so the quota it burns is the token's and never this box's reputation.
     "azure_key": "",
     "azure_region": "",
+
+    # 出街: one pre-rendered MP3 per day, so a car or a podcast client becomes a
+    # listener. Rendering is the only thing here that reaches Microsoft without
+    # anybody asking, so an empty voice switches the whole pass off.
+    "podcast_voice": "zh-HK-HiuGaaiNeural",
+    "podcast_rate": "+0%",
+    "podcast_keep_days": 30,      # audio only; the text archive is kept for ever
+    "podcast_every": 900.0,       # seconds between looks for a day with no audio
+    # The feed hands out absolute URLs, and a podcast client resolves them from
+    # wherever it is, not from this box. Empty means "believe the Host header",
+    # which is right behind `tailscale serve` and wrong behind anything that
+    # rewrites it.
+    "public_url": "",
 }
 
 # config.json key -> environment variable that overrides it.
@@ -172,6 +192,9 @@ def load_config(path: Path = CONFIG_PATH, overrides: dict | None = None) -> dict
                 "tts_burst_chars", "tts_chars_per_hour"):
         config[key] = float(config[key])
     config["port"] = int(config["port"])
+    config["podcast_keep_days"] = int(config["podcast_keep_days"])
+    config["podcast_every"] = float(config["podcast_every"])
+    config["public_url"] = str(config["public_url"]).rstrip("/")
     return config
 
 
@@ -531,6 +554,7 @@ class Handler(BaseHTTPRequestHandler):
     tts: TtsCache
     budget: CharBudget
     azure: AzureToken
+    renderer: render.Renderer | None
     config: dict
 
     def do_GET(self) -> None:  # noqa: N802
@@ -547,6 +571,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._api_speech_token(query)
             elif url.path == "/api/archive.tar.gz":
                 self._api_archive()
+            elif url.path == "/api/podcast.xml":
+                self._api_podcast(query)
+            elif url.path == "/api/episode.mp3":
+                self._api_episode(query)
+            elif url.path == "/api/chapters.json":
+                self._api_chapters(query)
+            elif url.path == "/api/episodes":
+                self._api_episodes()
             elif url.path == "/api/config":
                 self._send_json({
                     "base_url": self.config["base_url"],
@@ -560,6 +592,7 @@ class Handler(BaseHTTPRequestHandler):
                     "tts_trusted": is_trusted(self._who()),
                     "azure": self.azure.configured,
                     "archive": bool(self.archive_dir and self.archive_dir.is_dir()),
+                    "podcast": bool(self.renderer and self.renderer.episodes()),
                 })
             elif url.path == "/api/health":
                 self._send_json({"ok": True, "tts": tts_available()})
@@ -642,6 +675,104 @@ class Handler(BaseHTTPRequestHandler):
         self._send_bytes(body, "application/gzip", cache="no-store",
                          disposition=f'attachment; filename="tamchai-archive-{stamp}.tar.gz"')
 
+    # -- 出街: the pre-rendered day ---------------------------------------
+
+    @staticmethod
+    def _cut_of(query: dict) -> tuple[str, bool]:
+        cut = (query.get("cut") or ["full"])[0]
+        return (cut if cut in render.CUTS else "full",
+                (query.get("skip") or [""])[0] == "outlook")
+
+    def _public_base(self) -> str:
+        """Where a podcast client should come back to.
+
+        A feed's URLs are resolved by whatever downloads it, which is not this
+        box — so relative links are no use and the host has to be named. The
+        Host header is right behind `tailscale serve`, which is how this is
+        published; `public_url` overrides it for anything that rewrites it.
+        """
+        if self.config["public_url"]:
+            return self.config["public_url"]
+        host = self.headers.get("Host") or f"{self.config['host']}:{self.config['port']}"
+        scheme = self.headers.get("X-Forwarded-Proto") or "http"
+        return f"{scheme}://{host}"
+
+    def _api_podcast(self, query: dict) -> None:
+        if not self.renderer:
+            return self._send_json({"error": "no podcast"}, HTTPStatus.NOT_FOUND)
+        cut, skip = self._cut_of(query)
+        episodes = self.renderer.episodes()
+        # Each item advertises the length of *this* cut, not the whole day: a
+        # client that is told the wrong size may stop early or refuse the file.
+        lengths = {}
+        for episode in episodes:
+            lengths[episode["day"]] = sum(
+                end - start for start, end in self.renderer.slice_for(episode, cut, skip))
+        body = render.podcast_xml(episodes, self._public_base(), cut=cut,
+                                  skip_outlook=skip, slices=lengths)
+        self._send_bytes(body.encode("utf-8"), "application/rss+xml; charset=utf-8",
+                         cache="no-cache")
+
+    def _api_episode(self, query: dict) -> None:
+        day = (query.get("day") or [""])[0]
+        if not self.renderer or not FEED_DATE_PATTERN.fullmatch(day):
+            return self._send_json({"error": "no such episode"}, HTTPStatus.NOT_FOUND)
+        cut, skip = self._cut_of(query)
+        audio = self.renderer.audio_for(day, cut, skip)
+        if audio is None:
+            return self._send_json({"error": "no such episode"}, HTTPStatus.NOT_FOUND)
+        self._send_audio(audio, f"tamchai-{day}{'' if cut == 'full' else '-' + cut}.mp3")
+
+    def _api_chapters(self, query: dict) -> None:
+        day = (query.get("day") or [""])[0]
+        if not self.renderer or not FEED_DATE_PATTERN.fullmatch(day):
+            return self._send_json({"error": "no such episode"}, HTTPStatus.NOT_FOUND)
+        self._send_json({"version": "1.2.0", "chapters": self.renderer.chapters_for(day)},
+                        cache="no-cache")
+
+    def _api_episodes(self) -> None:
+        episodes = self.renderer.episodes() if self.renderer else []
+        self._send_json({
+            "episodes": [{k: e[k] for k in ("day", "headline", "seconds", "bytes", "rendered_at")}
+                         for e in episodes],
+            "voice": self.renderer.voice if self.renderer else "",
+            "keep_days": self.renderer.keep_days if self.renderer else 0,
+        })
+
+    def _send_audio(self, data: bytes, filename: str) -> None:
+        """Serve a clip, honouring a single `Range` — which is how a podcast
+        client resumes a download it has already half got."""
+        start, end = 0, len(data) - 1
+        requested = self.headers.get("Range", "")
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested.strip()) if requested else None
+        partial = False
+        if match and len(data):
+            first, last = match.group(1), match.group(2)
+            if first:
+                start = min(int(first), len(data) - 1)
+                end = min(int(last), len(data) - 1) if last else len(data) - 1
+            elif last:                                   # "bytes=-500": the tail
+                start = max(0, len(data) - int(last))
+            partial = True
+        if partial and start > end:
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{len(data)}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = data[start:end + 1] if partial else data
+        status = HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK
+        self.send_response(status)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _api_tts(self, query: dict) -> None:
         if (why := self._denied(query)) is not None:
             return self._send_json({"error": why}, HTTPStatus.UNAUTHORIZED)
@@ -722,6 +853,45 @@ class Handler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} {fmt % args}", flush=True)
 
 
+def render_loop(renderer: render.Renderer, upstream: Upstream, every: float) -> None:
+    """One day at a time, newest first, for ever.
+
+    Deliberately not a burst. Rendering is the only thing in here that reaches
+    Microsoft with nobody asking for it, and the standing Day 0 went to the
+    trouble of protecting is spent by the same box either way. The pacing is a
+    pause between blocks rather than a cap on days: a day is about twenty
+    requests a few seconds apart, so a first start against a month of archive
+    trickles for half an hour and every pass after it has one day to do, or
+    none at all.
+
+    It also runs on the reader's own `daily()`, so it archives the same days the
+    page would and never invents a second idea of what today is.
+    """
+    while True:
+        try:
+            days = upstream.daily().get("days") or []
+            pending = renderer.pending(days)[:renderer.keep_days]
+            for left, day in enumerate(pending, start=1 - len(pending)):
+                started = time.time()
+                # Said before the work, not after it. A day is a hundred seconds
+                # of synthesis that writes nothing until it finishes, and a log
+                # that stays silent through it is indistinguishable from one
+                # whose renderer never started — which cost an hour to find out.
+                print(f"rendering {day['day']}: {day.get('chars', 0)} chars"
+                      f"{f' ({-left} more to go)' if left else ''}", flush=True)
+                manifest = renderer.render(day)
+                print(f"rendered {manifest['day']}: {manifest['seconds']:.0f}s of audio, "
+                      f"{manifest['bytes'] / 1e6:.1f} MB, in {time.time() - started:.0f}s"
+                      f"{f' ({-left} left)' if left else ''}", flush=True)
+            if pending:
+                dropped = renderer.sweep()
+                if dropped:
+                    print(f"swept {dropped} day(s) of audio past {renderer.keep_days}", flush=True)
+        except Exception as exc:                      # a bad day must not stop the rest
+            print(f"render failed: {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(every)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="tamchainews reader sidecar")
     parser.add_argument("--port", type=int, help="overrides config.json")
@@ -731,6 +901,8 @@ def main() -> None:
     parser.add_argument("--config", default=str(CONFIG_PATH), help="path to config.json")
     parser.add_argument("--archive", default=str(ROOT / "data" / "archive"),
                         help="directory for day snapshots; empty string disables")
+    parser.add_argument("--audio", default=str(ROOT / "data" / "audio"),
+                        help="directory for rendered episodes; empty string disables the podcast")
     args = parser.parse_args()
 
     config = load_config(Path(args.config), {
@@ -745,6 +917,23 @@ def main() -> None:
     Handler.tts = TtsCache()
     Handler.budget = CharBudget(config["tts_burst_chars"], config["tts_chars_per_hour"])
     Handler.azure = AzureToken(config["azure_key"], config["azure_region"])
+
+    # The renderer is read-only here — the loop below is the only thing that
+    # writes — so the handler can serve episodes whether or not rendering runs.
+    audio_dir = Path(args.audio) if args.audio else None
+    Handler.renderer = render.Renderer(
+        Handler.archive_dir, audio_dir, synthesise,
+        voice=config["podcast_voice"], rate=config["podcast_rate"],
+        keep_days=config["podcast_keep_days"],
+    ) if audio_dir else None
+    if Handler.renderer and Handler.renderer.voice and tts_available():
+        threading.Thread(target=render_loop, daemon=True, name="render",
+                         args=(Handler.renderer, Handler.upstream,
+                               config["podcast_every"])).start()
+    elif Handler.renderer:
+        print("podcast: serving what is already rendered; set podcast_voice "
+              "(and install edge-tts) to render more", flush=True)
+
     if not config["tts_token"] and config["host"] not in ("127.0.0.1", "::1", "localhost"):
         print("warning: /api/tts has no token and is not bound to loopback — "
               "set tts_token if anything but the tailnet can reach it", flush=True)
