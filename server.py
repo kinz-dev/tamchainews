@@ -155,6 +155,7 @@ FEED_PARAMS = ("topics", "channel", "page", "date", "last")
 # request. `date` names one day instead and wins over it.
 FEED_LAST_PATTERN = re.compile(r"\d{1,2}[dh]")
 FEED_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
+WEEK_PATTERN = re.compile(r"\d{4}-W\d{2}")
 
 
 def days_in(last: str) -> int:
@@ -579,6 +580,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._api_chapters(query)
             elif url.path == "/api/episodes":
                 self._api_episodes()
+            elif url.path == "/api/weekly.xml":
+                self._api_weekly()
+            elif url.path == "/api/week.mp3":
+                self._api_week(query)
             elif url.path == "/api/config":
                 self._send_json({
                     "base_url": self.config["base_url"],
@@ -738,6 +743,20 @@ class Handler(BaseHTTPRequestHandler):
             "voice": self.renderer.voice if self.renderer else "",
             "keep_days": self.renderer.keep_days if self.renderer else 0,
         })
+
+    def _api_weekly(self) -> None:
+        if not self.renderer:
+            return self._send_json({"error": "no podcast"}, HTTPStatus.NOT_FOUND)
+        body = render.weekly_xml(self.renderer.weeks(), self._public_base())
+        self._send_bytes(body.encode("utf-8"), "application/rss+xml; charset=utf-8",
+                         cache="no-cache")
+
+    def _api_week(self, query: dict) -> None:
+        week = (query.get("week") or [""])[0]
+        audio = self.renderer.week_audio(week) if self.renderer and WEEK_PATTERN.fullmatch(week) else None
+        if not audio:
+            return self._send_json({"error": "no such week"}, HTTPStatus.NOT_FOUND)
+        self._send_audio(audio, f"tamchai-{week}.mp3")
 
     def _send_audio(self, data: bytes, filename: str) -> None:
         """Serve a clip, honouring a single `Range` — which is how a podcast

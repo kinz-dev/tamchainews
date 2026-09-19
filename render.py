@@ -28,6 +28,7 @@ fails a suite rather than quietly reading the news differently out loud.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import re
@@ -298,6 +299,53 @@ class Renderer:
             return data
         return b"".join(data[a:b] for a, b in ranges)
 
+    # -- 一週提要 ------------------------------------------------------
+
+    def weeks(self) -> list[dict]:
+        """Every ISO week with audio, newest first, priced at its 快讀 length.
+
+        The week is each day's **lead** — 標題 and 【本報訊】 — read in order,
+        Monday forward. Seven leads run about ten minutes against nearly an
+        hour of full days, and upstream cannot build this at all: it keeps
+        three days and this keeps everything.
+
+        No model, no summary of a summary. Upstream already writes one summary
+        of each day; the week is those, in order, which is the only version of
+        this that can be checked against what was actually published.
+        """
+        by_week: dict[str, list[dict]] = {}
+        for episode in self.episodes():
+            by_week.setdefault(iso_week(episode["day"]), []).append(episode)
+        out = []
+        for week, entries in by_week.items():
+            entries.sort(key=lambda e: e["day"])          # Monday forward
+            length = sum(self._lead_bytes(e) for e in entries)
+            monday, sunday = week_bounds(week)
+            out.append({
+                "week": week,
+                "from": entries[0]["day"],
+                "to": entries[-1]["day"],
+                "monday": monday,
+                "sunday": sunday,
+                "days": [e["day"] for e in entries],
+                "headlines": [e.get("headline") or e["day"] for e in entries],
+                "bytes": length,
+                "seconds": round(seconds_of(length), 3),
+                "generated_at": max(e.get("generated_at") or 0 for e in entries),
+            })
+        return sorted(out, key=lambda w: w["week"], reverse=True)
+
+    def _lead_bytes(self, manifest: dict) -> int:
+        return sum(end - start for start, end in self.slice_for(manifest, "quick"))
+
+    def week_audio(self, week: str) -> bytes | None:
+        """The week's leads, joined. Frame-aligned like every other cut."""
+        days = [e for e in self.episodes() if iso_week(e["day"]) == week]
+        if not days:
+            return None
+        days.sort(key=lambda e: e["day"])
+        return b"".join(self.audio_for(e["day"], "quick") or b"" for e in days)
+
     def chapters_for(self, day: str) -> list[dict]:
         """Podcasting 2.0 chapters: one per heading, at its own timestamp."""
         manifest = self.manifest(day)
@@ -386,6 +434,22 @@ def _digest_of(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
 
 
+# --------------------------------------------------------------- 一週提要
+
+
+def iso_week(day: str) -> str:
+    """`2026-09-18` → `2026-W38`. ISO, so a week never splits across a new year."""
+    year, week, _ = datetime.date.fromisoformat(day).isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def week_bounds(week: str) -> tuple[str, str]:
+    """The Monday and Sunday of an ISO week, as dates."""
+    year, number = week.split("-W")
+    monday = datetime.date.fromisocalendar(int(year), int(number), 1)
+    return monday.isoformat(), (monday + datetime.timedelta(days=6)).isoformat()
+
+
 # --------------------------------------------------------------- RSS
 
 _RFC2822 = "%a, %d %b %Y %H:%M:%S +0000"
@@ -455,6 +519,46 @@ def podcast_xml(episodes: list[dict], base: str, *, cut: str = "full",
             out.append(f'<podcast:chapters url="{_xml(base)}/api/chapters.json?day={day}"'
                        ' type="application/json+chapters"/>')
         out.append("</item>")
+
+    out += ["</channel>", "</rss>"]
+    return "\n".join(out) + "\n"
+
+
+def weekly_xml(weeks: list[dict], base: str, title: str = "譚仔新聞") -> str:
+    """One item per ISO week: that week's leads, Monday forward.
+
+    Its own feed rather than an extra item in the daily one, because they are
+    different subscriptions — the daily is the habit and this is the catch-up
+    after a week away, and a client that downloads both should not be handed the
+    same audio twice under one guid.
+    """
+    out = ['<?xml version="1.0" encoding="UTF-8"?>',
+           '<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"'
+           ' xmlns:atom="http://www.w3.org/2005/Atom">',
+           "<channel>",
+           f"<title>{_xml(title)} · 一週提要</title>",
+           f"<link>{_xml(base)}/</link>",
+           "<language>zh-HK</language>",
+           "<itunes:author>譚仔新聞</itunes:author>",
+           "<itunes:explicit>false</itunes:explicit>",
+           "<description>每星期嘅新聞導語，逐日順住聽。</description>",
+           f'<atom:link href="{_xml(base)}/api/weekly.xml" rel="self" type="application/rss+xml"/>']
+
+    for week in weeks:
+        link = f"{base}/api/week.mp3?week={week['week']}"
+        # Dated at the end of the material, not the end of the calendar week: a
+        # week still in progress is worth listening to before Sunday.
+        published = week.get("generated_at") or 0
+        out += [
+            "<item>",
+            f"<title>{_xml(week['week'])} 一週提要（{_xml(week['from'])} 至 {_xml(week['to'])}）</title>",
+            f'<guid isPermaLink="false">tamchai-{_xml(week["week"])}-weekly</guid>',
+            f"<pubDate>{rfc2822(published)}</pubDate>",
+            f'<enclosure url="{_xml(link)}" length="{week["bytes"]}" type="audio/mpeg"/>',
+            f"<itunes:duration>{clock(week['seconds'])}</itunes:duration>",
+            f"<description>{_xml(' · '.join(week.get('headlines') or []))}</description>",
+            "</item>",
+        ]
 
     out += ["</channel>", "</rss>"]
     return "\n".join(out) + "\n"

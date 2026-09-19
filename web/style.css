@@ -600,3 +600,16 @@ details.refs-box > summary:hover { color: var(--accent); }
 .rail-row .rail-button { margin-top: 0; flex: 1; }
 .rail-note.ok { color: var(--ok); }
 .rail-note.error { color: var(--danger); }
+
+/* 簡報: the same row as the cut picker, and the same shape */
+.brief-pick { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.brief-pick .brief {
+  display: flex; flex-direction: column; gap: 1px; align-items: center;
+  padding: 6px 14px; cursor: pointer;
+  background: var(--bg-raised); border: 0; border-right: 1px solid var(--border);
+  font: inherit; color: var(--text-dim);
+}
+.brief-pick .brief:last-child { border-right: 0; }
+.brief-pick .brief:hover { color: var(--accent); }
+.brief-pick .brief .k { font-size: 13px; font-weight: 700; }
+.brief-pick .brief .t { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }

@@ -12,6 +12,7 @@ a suite instead of quietly reading the news differently out loud.
 """
 
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -19,9 +20,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from render import (  # noqa: E402
-    BYTES_PER_SECOND, FRAME_BYTES, Renderer, blocks_of, clock, kept_blocks,
-    lead_end, normalise_for_speech, outlook_range, podcast_xml, rfc2822,
-    seconds_of,
+    BYTES_PER_SECOND, FRAME_BYTES, Renderer, blocks_of, clock, iso_week,
+    kept_blocks, lead_end, normalise_for_speech, outlook_range, podcast_xml,
+    rfc2822, seconds_of, week_bounds, weekly_xml,
 )
 
 # (input, spoken) — mirrored in tests/speech.test.js
@@ -257,6 +258,111 @@ class TestRenderer(unittest.TestCase):
                          ["2026-09-16", "2026-09-15"])
         self.assertFalse((self.audio / "2026-09-14.json").exists(),
                          "a manifest without audio would advertise an episode that is gone")
+
+
+# The short DIGEST above is all lead and no body, which is the opposite of a
+# real day: measured across the archive, the 標題 and 【本報訊】 run about a tenth
+# of the read. A week of leads being *much* shorter than a week of days is the
+# whole claim, so the fixture it is checked against has to have those
+# proportions.
+LONG_DIGEST = "\n".join([
+    "# 聯儲局加息 華為晶片提前發布",
+    "",
+    "**【本報訊】** 聯儲局宣布加息25個基點。華為發布新一代晶片。",
+    "",
+    "## 全球宏觀經濟",
+    "",
+    "美國聯儲局一致通過加息。" + "議息會議之後市場重新定價。" * 8,
+    "",
+    "英倫銀行維持利率不變。" + "分析師認為通脹仍然高企。" * 8,
+    "",
+    "## 科技產業",
+    "",
+    "華為提前發布訓練晶片。" + "性能預計翻倍並挑戰對手。" * 8,
+    "",
+    "長鑫存儲取代舊有供應商。" + "手機廠商開始大規模採用。" * 8,
+])
+
+
+class TestWeekly(unittest.TestCase):
+    """The week is each day's lead, in order. No model, no summary of a summary:
+    upstream already writes one summary of each day, and this is those."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.audio = root / "audio"
+        self.renderer = Renderer(root / "archive", self.audio, FakeTts(),
+                                 voice="zh-HK-HiuGaaiNeural", pause=0)
+        # 09-14 (Mon) … 09-18 (Fri) are one ISO week; 09-21 is the next Monday.
+        for day in ("2026-09-14", "2026-09-16", "2026-09-18", "2026-09-21"):
+            self.renderer.render({"day": day, "headline": f"頭條 {day}", "text": LONG_DIGEST,
+                                  "generated_at": 1789000000})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_iso_weeks_group_the_days_and_never_split_a_new_year(self):
+        self.assertEqual(iso_week("2026-09-14"), "2026-W38")
+        self.assertEqual(iso_week("2026-09-20"), "2026-W38", "Sunday closes the week")
+        self.assertEqual(iso_week("2026-09-21"), "2026-W39", "Monday opens the next")
+        self.assertEqual(week_bounds("2026-W38"), ("2026-09-14", "2026-09-20"))
+
+    def test_weeks_are_listed_newest_first_with_their_days_in_order(self):
+        weeks = self.renderer.weeks()
+        self.assertEqual([w["week"] for w in weeks], ["2026-W39", "2026-W38"])
+        older = weeks[1]
+        self.assertEqual(older["days"], ["2026-09-14", "2026-09-16", "2026-09-18"],
+                         "a catch-up reads Monday forward, not newest first")
+        self.assertEqual((older["from"], older["to"]), ("2026-09-14", "2026-09-18"))
+        self.assertEqual((older["monday"], older["sunday"]), ("2026-09-14", "2026-09-20"))
+
+    def test_a_week_is_its_days_leads_joined_and_nothing_else(self):
+        week = next(w for w in self.renderer.weeks() if w["week"] == "2026-W38")
+        audio = self.renderer.week_audio("2026-W38")
+        self.assertEqual(len(audio), week["bytes"], "the advertised length is the real one")
+        leads = [self.renderer.audio_for(day, "quick") for day in week["days"]]
+        self.assertEqual(audio, b"".join(leads))
+        self.assertEqual(len(audio) % FRAME_BYTES, 0, "a join off a frame would click")
+        # Much shorter than the same days read in full — the whole point.
+        full = sum(len(self.renderer.audio_for(day)) for day in week["days"])
+        self.assertLess(len(audio), full / 2)
+
+    def test_a_week_with_no_audio_is_not_advertised(self):
+        self.assertIsNone(self.renderer.week_audio("2026-W01"))
+        self.assertNotIn("2026-W01", [w["week"] for w in self.renderer.weeks()])
+
+    def test_the_weekly_feed_is_valid_and_carries_real_lengths(self):
+        import xml.etree.ElementTree as ET
+        xml_text = weekly_xml(self.renderer.weeks(), "https://box.example")
+        root = ET.fromstring(xml_text)
+        items = root.findall("./channel/item")
+        self.assertEqual(len(items), 2)
+        first = items[0]
+        self.assertIn("2026-W39", first.findtext("title"))
+        week = self.renderer.weeks()[0]
+        self.assertEqual(first.find("enclosure").get("length"), str(week["bytes"]))
+        self.assertIn("week=2026-W39", first.find("enclosure").get("url"))
+
+    def test_the_weekly_guid_differs_from_any_daily_one(self):
+        # Both feeds may be subscribed at once, and the same audio under one
+        # guid would have a client download it twice or skip it entirely.
+        weekly = weekly_xml(self.renderer.weeks(), "https://box.example")
+        daily = podcast_xml(self.renderer.episodes(), "https://box.example")
+        weekly_ids = set(re.findall(r"<guid[^>]*>([^<]+)</guid>", weekly))
+        daily_ids = set(re.findall(r"<guid[^>]*>([^<]+)</guid>", daily))
+        self.assertTrue(weekly_ids)
+        self.assertEqual(weekly_ids & daily_ids, set())
+
+    def test_an_empty_archive_still_produces_a_valid_weekly_feed(self):
+        import tempfile
+        import xml.etree.ElementTree as ET
+        with tempfile.TemporaryDirectory() as empty:
+            bare = Renderer(Path(empty), Path(empty) / "audio", FakeTts(), voice="v")
+            self.assertEqual(bare.weeks(), [])
+            root = ET.fromstring(weekly_xml(bare.weeks(), "https://box.example"))
+            self.assertEqual(root.findall("./channel/item"), [])
 
 
 class TestFeed(unittest.TestCase):
