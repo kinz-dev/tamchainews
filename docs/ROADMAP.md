@@ -16,7 +16,7 @@ new storage or a second process is a different kind of day.
 | ~~**0**~~ | ~~鎖門 · Close the door~~ | **Done.** Token, per-caller budget, and the forwarded-address trap that made both meaningful. |
 | ~~**1**~~ | ~~好聽啲 · Make it sound better~~ | **Done.** All nine Tier 1 items, plus a voice-selection bug that scoring had pointed at backwards. |
 | ~~**2**~~ | ~~今日有咩唔同~~ → 讀幾多 · Three lengths | **Done.** The delta read died on real data; the digest's own lead turns twelve minutes into one. |
-| **3** | 出街 · Get it off the laptop | A podcast feed reaches the car, the kitchen and everyone who will never install a PWA. |
+| ~~**3**~~ | ~~出街~~ · The podcast feed | **Done** (the feed). Azure client-direct still wants a key; stream.mp3 slips to Day 4. |
 | **4** | 食晒佢 · Finish what Day 3 starts | The rest of the value-4 items, three of which ride Day 3's render pipeline. |
 
 ---
@@ -149,9 +149,14 @@ contains its own short version, written by upstream, every day:**
 
 | | 09-14 | 09-15 | 09-16 | 09-17 | 09-18 |
 |---|---|---|---|---|---|
-| 全文 | 12:42 | 10:39 | 11:48 | 10:52 | 13:54 |
-| 提要 | 2:26 | 2:48 | 2:50 | 2:19 | 2:49 |
-| 快讀 | **1:18** | **1:15** | **1:02** | **1:15** | **1:25** |
+| 全文 | 15:09 | 12:42 | 14:05 | 12:58 | 16:08 |
+| 提要 | 2:54 | 3:19 | 3:22 | 2:45 | 3:00 |
+| 快讀 | **1:33** | **1:30** | **1:14** | **1:29** | **1:43** |
+
+*(These are the corrected figures. As first written they were a fifth shorter:
+Day 3 rendered two of these days as audio and measured the reader's
+characters-per-second assumption to be wrong, which moved every number on this
+page. 09-17 and 09-18 are now measured rather than estimated.)*
 
 So the twelve minutes become one by structure rather than by comparison — which
 also works on a day with no yesterday, and has nothing in it to drift.
@@ -192,19 +197,55 @@ saying otherwise would be arguing with you.
 
 ## Day 3 · 出街
 
-**1. `/api/podcast.xml`** — M
+**1. `/api/podcast.xml`** — ✅ done
 
-One episode per day, built from the archive, so Apple Podcasts becomes a client
-and CarPlay comes free. Needs the audio rendered ahead of time rather than on
-demand, which is the real work: a nightly pass that synthesises the day's
-segments, concatenates them, and writes one MP3 beside the day's JSON.
+One episode per archived day, rendered ahead of time by a pass in the container,
+so anything that subscribes to a podcast is now a client.
 
-- The archive volume grows. Cap it — keep 30 days of audio, all days of text.
-- Chapter marks per topic, if the concatenation step is tracking offsets anyway.
-- The feed is a static file once written; serve it from `_static`.
+**The measurement the whole design rests on.** edge-tts returns constant-bitrate
+48 kbps, 24 kHz mono MP3 in 144-byte frames with no ID3 header on either end —
+checked against the stream rather than assumed, and confirmed by `afinfo`
+against a file built by joining three clips: 1,597 packets, 38.328s, exactly the
+sum of its parts. So concatenation is byte concatenation, and **duration is
+bytes ÷ 6000 exactly**. Every offset the renderer records is a byte count that
+becomes a timestamp by division, and that is what makes the rest cheap:
 
-*Done when* the URL subscribes cleanly in Apple Podcasts and Pocket Casts, and
-yesterday's episode is there before breakfast.
+| | |
+|---|---|
+| Chapters | one per heading, at its own timestamp |
+| 快讀 | the lead is the first blocks, so the cut is a byte *prefix* — no second render |
+| 略過市場情緒展望 | a run dropped from the middle, still on frame boundaries |
+| `Range` | served, so a client can resume a half-finished download |
+
+Verified against the live 2026-09-18 episode: the feed advertises 5,810,112
+bytes and `0:16:08`; the file is 5,810,112 bytes and 968.352s. 快讀 is 103.008s,
+and chapter two starts at 103.008s.
+
+**A block at a time, not a sentence.** `speech.js` splits to ~90 characters
+because a browser utterance falls over past that; nothing in a file does. A
+whole paragraph in one request keeps the prosody that sentence-by-sentence
+synthesis throws away, and costs a fifth of the requests. The price is that
+提要 — which takes the first *sentence* of a paragraph — has nothing to slice on,
+so the feed offers 快讀 and 全文 and the page says so rather than quietly handing
+over a different length.
+
+**The duplication, admitted.** The pronunciation rules and the shape of a cut
+now exist in `render.py` as well as `web/speech.js` and `web/cut.js`, because
+the page is JavaScript and the renderer is Python. Both sides pin the same table
+of cases, and it caught a real one on the first run: `\b` is ASCII in JavaScript
+and Unicode in Python, so 「本地生產總值GDP」 has a word boundary in one and not
+the other — the page would have said "G D P" and the podcast "GDP".
+
+**And it corrected the reader.** The app had assumed 4.5 characters a second
+since the beginning. Two rendered days measure **3.75 spoken characters a
+second**, so every duration it has ever shown was a tenth to a fifth short —
+including the 讀幾多 picker from Day 2, whose entire argument is that its three
+numbers are real. Both constants are now measured, the estimate lands within 3%
+of rendered audio, and a test pins it to a real recording.
+
+*Still open:* Apple Podcasts reads chapters from ID3 frames rather than the
+Podcasting 2.0 JSON, so chapter marks work in Pocket Casts and not in Apple's
+client. Writing ID3 CHAP frames is a contained job for another day.
 
 **2. Azure Speech, client-direct** — M · *the server half is already in*
 

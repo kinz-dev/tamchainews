@@ -3,7 +3,7 @@
 
   "feed_ttl": 600,
   "upstream_timeout": 30,
-  "chars_per_second": 4.5,
+  "chars_per_second": 4.1,
 
   "host": "127.0.0.1",
   "port": 8082,
@@ -13,5 +13,11 @@
   "tts_chars_per_hour": 60000,
 
   "azure_key": "",
-  "azure_region": ""
+  "azure_region": "",
+
+  "podcast_voice": "zh-HK-HiuGaaiNeural",
+  "podcast_rate": "+0%",
+  "podcast_keep_days": 30,
+  "podcast_every": 900,
+  "public_url": ""
 }

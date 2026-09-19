@@ -44,6 +44,7 @@ const els = {
   voiceSelect: $('voice-select'), rateSelect: $('rate-select'), refresh: $('refresh'),
   ttsTokenButton: $('tts-token'),
   lexicon: $('lexicon'), lexiconNote: $('lexicon-note'), exportArchive: $('export-archive'),
+  copyPodcast: $('copy-podcast'), podcastNote: $('podcast-note'),
   prev: $('prev'), toggle: $('toggle'), next: $('next'), stop: $('stop'),
   progress: $('progress'), progressLabel: $('progress-label'),
 };
@@ -1081,12 +1082,14 @@ function setCut(id) {
   if (!isCut(id) || id === settings.cut) return;
   settings.cut = id;
   localStorage.setItem('tamchai.cut', id);
+  if (!els.copyPodcast.hidden) describePodcast();
   recut();
 }
 
 function setSkipOutlook(on) {
   settings.skipOutlook = Boolean(on);
   localStorage.setItem('tamchai.skipOutlook', settings.skipOutlook ? '1' : '0');
+  if (!els.copyPodcast.hidden) describePodcast();
   recut();
 }
 
@@ -1713,6 +1716,45 @@ els.exportArchive.addEventListener('click', () => {
 });
 
 /**
+ * The feed address, at the length you are already reading.
+ *
+ * A podcast client wants a URL typed into it, not a page to visit — following
+ * the link only ever shows you XML. So this copies, and copies the *absolute*
+ * one: the phone that subscribes is not the machine looking at this page.
+ *
+ * 提要 has no feed of its own. The episodes are rendered a block at a time, so
+ * a cut that takes the first *sentence* of a paragraph has nothing to slice on
+ * — and saying so is better than quietly handing over a different length.
+ */
+function podcastFeedUrl() {
+  const query = [];
+  if (settings.cut === 'quick') query.push('cut=quick');
+  if (settings.skipOutlook) query.push('skip=outlook');
+  return new URL(`/api/podcast.xml${query.length ? `?${query.join('&')}` : ''}`, location.href).href;
+}
+
+function describePodcast() {
+  const label = settings.cut === 'quick' ? '快讀' : '全文';
+  const tail = settings.skipOutlook ? '，冇市場情緒展望' : '';
+  els.copyPodcast.textContent = `🎧 複製 podcast 網址（${label}${tail}）`;
+  els.podcastNote.textContent = settings.cut === 'gist'
+    ? '提要冇獨立 feed — 訂閱嘅係全文。'
+    : '貼入 Apple Podcasts、Pocket Casts 等。';
+  els.podcastNote.hidden = false;
+}
+
+els.copyPodcast.addEventListener('click', async () => {
+  const url = podcastFeedUrl();
+  try {
+    await navigator.clipboard.writeText(url);
+    showBanner(`已複製：${url}`, false, { seconds: 8 });
+  } catch {
+    // No clipboard permission, or an insecure origin: show it to copy by hand.
+    showBanner(url, false, { seconds: 20 });
+  }
+});
+
+/**
  * Say when a source has gone quiet without going wrong.
  *
  * This is the failure that hides: upstream reports the feed as fine, it simply
@@ -1901,6 +1943,8 @@ document.addEventListener('keydown', (event) => {
   }
   restoreTtsToken();
   els.exportArchive.hidden = !state.config.archive;
+  els.copyPodcast.hidden = !state.config.podcast;
+  if (state.config.podcast) describePodcast();
   await setupVoices();
   if (!location.hash) location.hash = buildRoute({ view: 'digests' });
   state.route = parseRoute(location.hash);

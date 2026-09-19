@@ -85,6 +85,18 @@ not on the sesame box — so the reader is available to any tailnet device while
 - Output: `[{id, kind: heading|para|bullet, text, speak, charStart, charEnd}]` — `charStart/End`
   anchor the on-screen highlight.
 
+**`render.py`** — one archived day → one MP3 (pure enough to unit-test; the synth is injected)
+- `blocks_of(markdown)` → heading/paragraph/bullet blocks, `speak` normalised. No sentence
+  split: a paragraph goes to the voice whole, which keeps prosody and cuts requests 5×.
+- `Renderer.render(day)` synthesises block by block, concatenates, and writes
+  `audio/<day>.mp3` + `<day>.json` — the manifest carrying each block's byte offset.
+- edge-tts returns CBR 48 kbps / 24 kHz mono in 144-byte frames with no ID3 on either end,
+  so **duration = bytes ÷ 6000** and joining clips is joining bytes. Chapters, the 快讀
+  prefix and the outlook skip are all slices of those offsets; nothing is re-synthesised.
+- `podcast_xml()` builds the feed; each item advertises the length of *its* cut.
+- The pronunciation rules and the cut shape are mirrored from `speech.js`/`cut.js`, pinned
+  from both sides by the same table of cases in `tests/`.
+
 **`cut.js`** — one day at three lengths (pure, unit-testable)
 - `planCut(blocks, {cut, skipOutlook})` → the pieces to render, the queue to play, and a
   count of what was left out. `快讀` is the 標題 and the 【本報訊】 lead — everything above the

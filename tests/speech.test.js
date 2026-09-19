@@ -70,6 +70,49 @@ test('a Latin gloss in brackets is dropped from speech but kept on screen', () =
   assert.equal(blocks[0].segments[0].text, '美國聯邦儲備局（Fed）宣布。');
 });
 
+// The same table `tests/test_render.py` asserts against render.py. The rules
+// live in two languages because the page is JavaScript and the podcast renderer
+// is Python, and there is no third place to put them — so both sides pin the
+// same cases, and a rule changed in one and not the other fails a suite instead
+// of reading the news differently out loud in the car than on the page.
+//
+// It has already caught one: `\b` is ASCII in JavaScript and Unicode in Python,
+// so 「本地生產總值GDP」 has a word boundary here and none there.
+const SHARED_SPEECH_CASES = [
+  ['上調至3.75%至4%', '上調至百分之3.75至百分之4'],
+  ['美國聯邦儲備局（Fed）宣布', '美國聯邦儲備局宣布'],
+  ['股票市場（Equities）', '股票市場'],
+  ['Fed 主席表示', '聯儲局 主席表示'],
+  ['FOMC 一致通過', '聯邦公開市場委員會 一致通過'],
+  ['《五年規劃（2026—2030）》', '《五年規劃（2026—2030）》'],
+  ['估值達$1.2萬億', '估值達1.2萬億美元'],
+  ['見報道 [12] 所述', '見報道 所述'],
+  ['AI 監管', 'A I 監管'],
+  ['本地生產總值GDP增長', '本地生產總值G D P增長'],
+  ['甲 · 乙', '甲，乙'],
+];
+
+test('the estimate is pinned to audio that was actually rendered', () => {
+  // 2026-09-18: 3,627 spoken characters came back as 968.4s of MP3 from
+  // zh-HK-HiuGaai at +0%, measured off the file the podcast renderer wrote.
+  // The estimate is what the 讀幾多 picker puts on its buttons, so it is worth
+  // keeping honest against a real recording rather than a plausible number.
+  const segments = Array.from({ length: 60 }, () => ({
+    speak: '一'.repeat(Math.round(3627 / 60)),
+    pauseAfter: 0,
+  }));
+  const estimate = estimateSeconds(segments, 1);
+  assert.ok(Math.abs(estimate - 968) / 968 < 0.05,
+            `${estimate.toFixed(0)}s estimated against 968s of real audio`);
+});
+
+test('the shared pronunciation table, which render.py must agree with', () => {
+  setUserLexicon([]);
+  for (const [source, spoken] of SHARED_SPEECH_CASES) {
+    assert.equal(normalizeForSpeech(source), spoken, source);
+  }
+});
+
 test('a bare acronym is still expanded', () => {
   assert.equal(normalizeForSpeech('Fed 主席表示'), '聯儲局 主席表示');
   assert.equal(normalizeForSpeech('FOMC 一致通過'), '聯邦公開市場委員會 一致通過');
